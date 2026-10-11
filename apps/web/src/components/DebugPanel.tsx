@@ -1,10 +1,10 @@
 import { useEffect, useId, useMemo, useRef, useState, type FormEvent } from 'react';
 import { Box, ChevronDown, ChevronRight, Code2, Folder, Layers, LoaderCircle, RefreshCw, Search, Undo2, Redo2, X } from 'lucide-react';
-import { COORD_MAX, COORD_MIN, type Operation, type ScenePlan, type SceneSnapshot, type ServiceHealth } from '../../../../packages/protocol/src/index.ts';
+import { type Operation, type ScenePlan, type SceneSnapshot, type ServiceHealth } from '../../../../packages/protocol/src/index.ts';
 import '../styles/debug-panel.css';
 
 export type DebugSelection = { kind: 'group' | 'part'; id: string } | null;
-export interface DebugTurn { id: string; text: string; status?: string; plan?: ScenePlan }
+export interface DebugTurn { id: string; text: string; status?: string; plan?: ScenePlan; appliedBatches?: number; acknowledgedBatches?: number }
 export interface DebugPanelProps {
   open: boolean;
   onClose: () => void;
@@ -15,7 +15,7 @@ export interface DebugPanelProps {
   canRedo: boolean;
   onUndo: () => void;
   onRedo: () => void;
-  onApply: (operations: Operation[]) => { ok: boolean; error?: string };
+  onApply: (operations: Operation[]) => Promise<{ ok: boolean; error?: string }>;
   recentTurns: DebugTurn[];
   onReadTurn: (id: string, signal: AbortSignal) => Promise<unknown>;
   onSelectionChange?: (selection: DebugSelection) => void;
@@ -64,7 +64,7 @@ function boundsText(bounds: Bounds | null) { return bounds ? `(${vectorText(boun
 function sizeText(bounds: Bounds | null) { return bounds ? axes.map(axis => bounds.max[axis] - bounds.min[axis] + 1).join(' × ') : '—'; }
 function jsonText(value: unknown): string {
   // Diagnostics stay in component memory; credential-shaped fields are never displayed.
-  return JSON.stringify(value, (key, item: unknown) => /^(authorization|api[-_]?key|(?:deepseek|mimo)[-_]api[-_]key|access[-_]?token|password|secret)$/i.test(key) ? '[已隐藏]' : item, 2) ?? '没有可显示的 JSON 内容';
+  return JSON.stringify(value, (key, item: unknown) => /^(authorization|api[-_]?key|(?:deepseek|mimo)[-_]api[-_]key|access[-_]?token|password|secret|reasoning_content|reasoning|chain_of_thought)$/i.test(key) ? '[已隐藏]' : item, 2) ?? '没有可显示的 JSON 内容';
 }
 
 export function DebugPanel({ open, onClose, snapshot, health, busy, canUndo, canRedo, onUndo, onRedo,
@@ -122,10 +122,10 @@ export function DebugPanel({ open, onClose, snapshot, health, busy, canUndo, can
     reader.current?.abort(); reader.current = null; setReading(false); setDiagnostics(''); setReadError('');
   }, [turnId]);
 
-  function apply(operations: Operation[], message: string): boolean {
+  async function apply(operations: Operation[], message: string): Promise<boolean> {
     if (busy) return false;
     try {
-      const result = onApply(operations);
+      const result = await onApply(operations);
       setFeedback({ text: result.ok ? message : result.error || '修改没有提交，场景保持原样。', error: !result.ok });
       return result.ok;
     } catch (error) {
@@ -140,8 +140,8 @@ export function DebugPanel({ open, onClose, snapshot, health, busy, canUndo, can
   function move(event: FormEvent) {
     event.preventDefault(); if (!selection) return;
     const parsed = { x: Number(delta.x), y: Number(delta.y), z: Number(delta.z) };
-    if (axes.some(axis => !delta[axis].trim() || !Number.isInteger(parsed[axis]) || parsed[axis] < COORD_MIN || parsed[axis] > COORD_MAX)) {
-      setFeedback({ text: `每个轴都需填写 ${COORD_MIN} 到 ${COORD_MAX} 的整数。`, error: true }); return;
+    if (axes.some(axis => !delta[axis].trim() || !Number.isSafeInteger(parsed[axis]))) {
+      setFeedback({ text: '每个轴都需填写有限安全整数。', error: true }); return;
     }
     if (axes.every(axis => parsed[axis] === 0)) { setFeedback({ text: '至少一个轴需要移动一格。', error: true }); return; }
     apply([selection.kind === 'group' ? { op: 'translate_group', groupId: selection.id, delta: parsed } : { op: 'translate_part', partId: selection.id, delta: parsed }], '位移已提交，可撤销。');
@@ -150,14 +150,14 @@ export function DebugPanel({ open, onClose, snapshot, health, busy, canUndo, can
     if (!selection) return;
     apply([selection.kind === 'group' ? { op: 'paint_group', groupId: selection.id, color } : { op: 'paint_part', partId: selection.id, color, region: null }], '颜色已提交，可撤销。');
   }
-  function remove() {
+  async function remove() {
     if (!selection) return;
-    if (apply([selection.kind === 'group' ? { op: 'remove_group', groupId: selection.id } : { op: 'remove_part', partId: selection.id }], '已删除，可用撤销恢复。')) { setSelection(null); setConfirmDelete(false); }
+    if (await apply([selection.kind === 'group' ? { op: 'remove_group', groupId: selection.id } : { op: 'remove_part', partId: selection.id }], '已删除，可用撤销恢复。')) { setSelection(null); setConfirmDelete(false); }
   }
-  function createGroup(event: FormEvent) {
+  async function createGroup(event: FormEvent) {
     event.preventDefault(); const name = newGroupName.trim(); if (!name) return;
     const id = `group-${crypto.randomUUID().slice(0, 12)}`;
-    if (apply([{ op: 'define_group', group: { id, name } }], '物件组已建立，可以为部件设置归属。')) { setNewGroupName(''); setSelection({ kind: 'group', id }); }
+    if (await apply([{ op: 'define_group', group: { id, name } }], '物件组已建立，可以为部件设置归属。')) { setNewGroupName(''); setSelection({ kind: 'group', id }); }
   }
   async function readTurn() {
     if (!turnId) return;
@@ -232,22 +232,22 @@ export function DebugPanel({ open, onClose, snapshot, health, busy, canUndo, can
               {selectedGroup && <form className="debug-inline-form" onSubmit={event => { event.preventDefault(); if (groupName.trim()) apply([{ op: 'rename_group', groupId: selectedGroup.id, name: groupName.trim() }], '物件组已重命名。'); }}><label className="debug-field"><span>物件组名称</span><input value={groupName} maxLength={80} aria-label="物件组名称" onChange={event => setGroupName(event.target.value)} /></label><button className="debug-secondary" disabled={!groupName.trim() || groupName.trim() === selectedGroup.name}>重命名</button></form>}
               {selectedPart && <label className="debug-field"><span>部件归属</span><select aria-label="部件所属物件组" value={selectedPart.part.groupId ?? ''} onChange={event => apply([{ op: 'assign_part_group', partId: selectedPart.part.id, groupId: event.target.value || null }], '部件归属已更新。')}><option value="">未归组</option>{[...stats.groups.values()].map(group => <option value={group.id} key={group.id}>{group.name} · {group.id}</option>)}</select></label>}
               <div className="debug-paint-row"><label className="debug-field"><span>整{selection.kind === 'group' ? '组' : '个部件'}改色</span><span className="debug-color-input"><input type="color" aria-label="调试改色" value={color} onChange={event => setColor(event.target.value)} /><code>{color.toUpperCase()}</code></span></label><button className="debug-secondary" onClick={paint} type="button" disabled={!selectedStats.count}>应用颜色</button></div>
-              <form className="debug-move-form" onSubmit={move}><span className="debug-field-label">整数位移 · 世界坐标</span><div className="debug-move-inputs">{axes.map(axis => <label key={axis}><span>{axis.toUpperCase()}</span><input type="number" step={1} min={COORD_MIN} max={COORD_MAX} required aria-label={`${axis.toUpperCase()} 轴位移格数`} value={delta[axis]} onChange={event => setDelta(previous => ({ ...previous, [axis]: event.target.value }))} /></label>)}<button className="debug-secondary" type="submit">移动</button></div><p className="debug-help">+Y 向上，+Z 为正前方。碰撞或越界时整笔修改不会提交。</p></form>
+              <form className="debug-move-form" onSubmit={move}><span className="debug-field-label">整数位移 · 世界坐标</span><div className="debug-move-inputs">{axes.map(axis => <label key={axis}><span>{axis.toUpperCase()}</span><input type="number" step={1} required aria-label={`${axis.toUpperCase()} 轴位移格数`} value={delta[axis]} onChange={event => setDelta(previous => ({ ...previous, [axis]: event.target.value }))} /></label>)}<button className="debug-secondary" type="submit">移动</button></div><p className="debug-help">+Y 向上，+Z 为正前方。碰撞或数值精度溢出时整笔修改不会提交。</p></form>
               {confirmDelete ? <div className="debug-delete-confirm"><p>{selection.kind === 'group' ? '删除物件组及组内所有部件和方块？' : '删除这个部件及其全部方块？'}可用撤销恢复。</p><div><button className="debug-secondary" type="button" onClick={() => setConfirmDelete(false)}>取消</button><button className="debug-danger" type="button" onClick={remove}>确认删除</button></div></div> : <button className="debug-text-button debug-delete" type="button" onClick={() => setConfirmDelete(true)}>删除{selection.kind === 'group' ? '整个物件组' : '部件'}</button>}
             </fieldset>
           </> : <p className="debug-empty">在上方选择一个物件组或部件。修改会经过同一场景事务，并进入保存与撤销记录。</p>}
           {feedback && <p className={`debug-feedback ${feedback.error ? 'is-error' : ''}`} role={feedback.error ? 'alert' : 'status'}>{feedback.text}</p>}
         </section>
       </> : <>
-        <section className="debug-section" aria-labelledby={`${panelId}-connection`}><h3 id={`${panelId}-connection`}>服务状态</h3><dl className="debug-properties"><div><dt>模型</dt><dd>{health?.model ?? '尚未获取'}</dd></div><div><dt>DeepSeek / ASR / TTS</dt><dd>{health ? [health.aiConfigured, health.asrConfigured, health.ttsConfigured].map(value => value ? '已配置' : '未配置').join(' / ') : '尚未获取'}</dd></div></dl><p className="debug-help">配置状态不代表本次调用成功。这里不显示密钥。</p></section>
+        <section className="debug-section" aria-labelledby={`${panelId}-connection`}><h3 id={`${panelId}-connection`}>服务状态</h3><dl className="debug-properties"><div><dt>模型</dt><dd>{health?.model ?? '尚未获取'}</dd></div><div><dt>推理</dt><dd>{health?.thinking === 'enabled' ? `已开启${health.reasoningEffort ? ` / ${health.reasoningEffort}` : ''}` : '尚未报告'}</dd></div><div><dt>DeepSeek / ASR / TTS</dt><dd>{health ? [health.aiConfigured, health.asrConfigured, health.ttsConfigured].map(value => value ? '已配置' : '未配置').join(' / ') : '尚未获取'}</dd></div></dl><p className="debug-help">配置状态不代表本次调用成功。这里不显示密钥或原始推理内容。</p></section>
         <section className="debug-section" aria-labelledby={`${panelId}-requests`}>
           <h3 id={`${panelId}-requests`}>本页最近回合</h3>
           <label className="debug-field"><span>选择请求</span><select aria-label="选择本页最近请求" value={turnId} onChange={event => setTurnId(event.target.value)} disabled={!recentTurns.length}><option value="" disabled>尚无请求</option>{[...recentTurns].reverse().map(turn => <option value={turn.id} key={turn.id}>{turn.text.slice(0, 45)}{turn.text.length > 45 ? '…' : ''}</option>)}</select></label>
-          {selectedTurn ? <><dl className="debug-properties debug-request-info"><div><dt>请求 ID</dt><dd><code>{selectedTurn.id}</code></dd></div><div><dt>本地状态</dt><dd>{selectedTurn.status ?? '未提供'}</dd></div></dl><p className="debug-prompt">{selectedTurn.text}</p>
+          {selectedTurn ? <><dl className="debug-properties debug-request-info"><div><dt>请求 ID</dt><dd><code>{selectedTurn.id}</code></dd></div><div><dt>本地状态</dt><dd>{selectedTurn.status ?? '未提供'}</dd></div>{selectedTurn.appliedBatches !== undefined && <div><dt>本地已执行 / 已确认批次</dt><dd>{selectedTurn.appliedBatches} / {selectedTurn.acknowledgedBatches ?? 0}</dd></div>}</dl><p className="debug-prompt">{selectedTurn.text}</p>
             <button className="debug-secondary debug-refresh" disabled={reading} onClick={() => void readTurn()}>{reading ? <LoaderCircle size={15} className="debug-spin" aria-hidden="true" /> : <RefreshCw size={15} aria-hidden="true" />}{reading ? '正在读取…' : '读取 / 刷新服务端状态'}</button>
             {readError && <p className="debug-feedback is-error" role="alert">{readError}</p>}
             {diagnostics && <details className="debug-json" open><summary>同会话诊断 · JSON</summary><pre><code>{diagnostics}</code></pre></details>}
-            <details className="debug-json" open><summary>本页收到的完整计划</summary>{selectedTurn.plan ? <pre><code>{jsonText(selectedTurn.plan)}</code></pre> : <p className="debug-empty">这个回合还没有收到场景计划。</p>}</details>
+            <details className="debug-json" open><summary>本页最近一批计划</summary>{selectedTurn.plan ? <pre><code>{jsonText(selectedTurn.plan)}</code></pre> : <p className="debug-empty">这个回合还没有收到场景计划。</p>}</details>
           </> : <p className="debug-empty">发送一次创作想法后，这里会显示当前页面保留的回合。</p>}
           <p className="debug-help">只有手动点击才读取服务端；切换回合或关闭面板会取消读取。服务端过期后，本页已有计划仍可查看。所有 JSON 仅作为文本显示。</p>
         </section>

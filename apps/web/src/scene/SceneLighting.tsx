@@ -15,8 +15,14 @@ export function SceneLighting({ bounds }: { bounds: Box3 }) {
     const shadow = mainLight.current?.shadow;
     scene.add(target);
     gl.shadowMap.type = PCFShadowMap;
+    const autoUpdate = gl.shadowMap.autoUpdate;
+    // Camera movement does not change sunlight or casters; scene/motion changes mark the map dirty.
+    gl.shadowMap.autoUpdate = false;
+    gl.shadowMap.needsUpdate = true;
     return () => {
       scene.remove(target);
+      gl.shadowMap.autoUpdate = autoUpdate;
+      gl.shadowMap.needsUpdate = true;
       // R3F disposes the declarative light too; clear handles so effect replay is safe.
       shadow?.dispose();
       if (shadow) { shadow.map = null; shadow.mapPass = null; }
@@ -58,13 +64,13 @@ export function SceneLighting({ bounds }: { bounds: Box3 }) {
     camera.updateProjectionMatrix();
     light.shadow.updateMatrices(light);
     light.shadow.needsUpdate = true;
+    gl.shadowMap.needsUpdate = true;
     invalidate();
-  }, [bounds, target, invalidate]);
+  }, [bounds, target, gl, invalidate]);
 
   return <>
     <ambientLight intensity={Math.PI * 0.60} />
     <hemisphereLight args={['#FFFDF5', '#E4ECD8', Math.PI * 0.22]} />
-    {/* Keep automatic shadow updates: demand frames already stop when motion is idle. */}
     <directionalLight ref={mainLight} target={target} castShadow intensity={Math.PI * 0.46} color="#FFF6E7"
       shadow-mapSize={[2048, 2048]} shadow-normalBias={0.03} shadow-radius={2} />
     <directionalLight position={[30, 18, -20]} intensity={Math.PI * 0.12} color="#EDF5FF" />

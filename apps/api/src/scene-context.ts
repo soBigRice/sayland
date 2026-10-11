@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import {
-  COORD_MAX, MAX_CANDIDATE_CELLS, MAX_SCENE_GROUPS, MAX_SCENE_VOXELS, partIdSchema, vecSchema,
+  coordinateSchema, MAX_CANDIDATE_CELLS, MAX_SCENE_GROUPS, MAX_SCENE_VOXELS, partIdSchema, vecSchema,
   type ChatRequest, type Part, type SceneSnapshot,
 } from '../../../packages/protocol/src/index.ts';
 
@@ -30,8 +30,80 @@ export const sceneQuerySchema = z.object({
 export type SceneQuery = z.infer<typeof sceneQuerySchema>;
 
 export class SceneQueryError extends Error {
-  readonly code: 'INVALID_QUERY' | 'PART_NOT_FOUND' | 'OFFSET_OUT_OF_RANGE' | 'SCENE_CAPACITY';
+  readonly code: 'INVALID_QUERY' | 'PART_NOT_FOUND' | 'OFFSET_OUT_OF_RANGE' | 'SCENE_CAPACITY' | 'STALE_REVISION' | 'REGION_TOO_LARGE';
   constructor(code: SceneQueryError['code'], message: string) { super(message); this.name = 'SceneQueryError'; this.code = code; }
+}
+
+// Local offsets have the same numeric safety contract as world coordinates.
+const localInteger = coordinateSchema;
+const localVector = z.object({ x: localInteger, y: localInteger, z: localInteger }).strict();
+export const localReadRegionSchema = z.object({ min: localVector, max: localVector }).strict()
+  .describe('部件局部整数最小角闭区间，world=part.origin+local；不是世界坐标')
+  .superRefine((region, context) => {
+    for (const axis of AXES) if (region.max[axis] < region.min[axis]) {
+      context.addIssue({ code: 'custom', path: ['max', axis], message: '局部区域最大坐标不能小于最小坐标' });
+    }
+  });
+export const readRegionSchema = z.object({
+  revision: z.number().int().nonnegative().describe('必须等于当前场景摘要的revision；旧版本读取不复用'),
+  partId: partIdSchema,
+  region: localReadRegionSchema.nullable().describe('null读取整个部件；超过4096实际方块会报错，请按薄层缩小局部区域'),
+}).strict();
+export type ReadRegionQuery = z.infer<typeof readRegionSchema>;
+type RegionEncoding = { encoding: 'cells'; palette: string[]; cells: [number, number, number, number][] }
+  | { encoding: 'layers'; slices: { offset: Vec3; palette: { symbol: string; color: string }[]; layers: { y: number; rows: string[] }[] } };
+export type RegionRead = RegionEncoding & {
+  revision: number; part: Part; region: ReadRegionQuery['region']; count: number; complete: true;
+  coordinateSpace: 'part-local-minimum-corner'; worldBounds: Bounds | null; localBounds: Bounds | null;
+  semantics: string;
+};
+
+/** Lossless geometry for edits; unlike occupancy runs, this preserves every cell's exact color. */
+export function readRegion(snapshot: SceneSnapshot, input: unknown): RegionRead {
+  assertSceneCapacity(snapshot);
+  const parsed = readRegionSchema.safeParse(input);
+  if (!parsed.success) throw new SceneQueryError('INVALID_QUERY', parsed.error.issues.map(issue => `${issue.path.join('.')}: ${issue.message}`).join('；'));
+  const { revision, partId, region } = parsed.data;
+  if (revision !== snapshot.revision) throw new SceneQueryError('STALE_REVISION', `请求版本${revision}已过期，当前场景版本为${snapshot.revision}，请按最新摘要重新读取`);
+  const part = snapshot.parts.find(item => item.id === partId);
+  if (!part) throw new SceneQueryError('PART_NOT_FOUND', `部件 ${partId} 不存在，请读取场景摘要后重试`);
+  const localPosition = (voxel: Voxel): Vec3 => {
+    const local = { x: voxel.cell.x - part.origin.x, y: voxel.cell.y - part.origin.y, z: voxel.cell.z - part.origin.z };
+    if (!Object.values(local).every(Number.isSafeInteger)) throw new SceneQueryError('INVALID_QUERY', '部件局部坐标运算超出安全整数精度');
+    return local;
+  };
+  const cells = snapshot.voxels.filter(voxel => voxel.partId === partId && (!region || AXES.every(axis => {
+    const local = localPosition(voxel)[axis];
+    return local >= region.min[axis] && local <= region.max[axis];
+  }))).sort((a, b) => a.cell.y - b.cell.y || a.cell.z - b.cell.z || a.cell.x - b.cell.x);
+  if (cells.length > 4096) throw new SceneQueryError('REGION_TOO_LARGE', `该范围有${cells.length}个实际方块，超过4096格读取上限；请缩小局部region分区读取，未返回截断数据`);
+  let worldBounds: Bounds | null = null, localBounds: Bounds | null = null;
+  const palette: string[] = [], paletteIndex = new Map<string, number>();
+  const tuples: [number, number, number, number][] = cells.map(voxel => {
+    const local = localPosition(voxel);
+    worldBounds = expandBounds(worldBounds, voxel.cell); localBounds = expandBounds(localBounds, local);
+    if (!paletteIndex.has(voxel.color)) { paletteIndex.set(voxel.color, palette.length); palette.push(voxel.color); }
+    return [local.x, local.y, local.z, paletteIndex.get(voxel.color)!];
+  });
+  let encoded: RegionEncoding = { encoding: 'cells', palette, cells: tuples };
+  const bounds = localBounds as Bounds | null;
+  const symbols = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+  if (bounds && palette.length <= symbols.length) {
+    const size = { x: bounds.max.x - bounds.min.x + 1, y: bounds.max.y - bounds.min.y + 1, z: bounds.max.z - bounds.min.z + 1 };
+    // Dense output is bounded by its candidate volume, not just occupied count.
+    if (AXES.every(axis => size[axis] <= 64) && size.x * size.y * size.z <= 16_384) {
+      const positions = new Map(tuples.map(([x, y, z, color]) => [`${x},${y},${z}`, symbols[color]]));
+      const dense: RegionEncoding = { encoding: 'layers', slices: {
+        offset: { ...bounds.min }, palette: palette.map((color, index) => ({ symbol: symbols[index], color })),
+        layers: Array.from({ length: size.y }, (_, y) => ({ y, rows: Array.from({ length: size.z }, (_, z) =>
+          Array.from({ length: size.x }, (_, x) => positions.get(`${x + bounds.min.x},${y + bounds.min.y},${z + bounds.min.z}`) ?? '.').join('')) })),
+      } };
+      if (JSON.stringify(dense).length < JSON.stringify(encoded).length) encoded = dense;
+    }
+  }
+  return { revision, part: structuredClone(part), region: structuredClone(region), count: cells.length, complete: true,
+    coordinateSpace: 'part-local-minimum-corner', worldBounds, localBounds, ...encoded,
+    semantics: '仅返回指定部件范围内的全部实际方块和逐格颜色，不含其他部件。cells为[x,y,z,colorIndex]，layers的offset同样是局部坐标；world=part.origin+local。局部空白不代表其他部件也为空，查碰撞请用inspect_scene且partId:null。' };
 }
 
 interface ColorStats {
@@ -131,7 +203,7 @@ export function sceneSummary(input: ChatRequest): unknown {
   for (const voxel of supportTop.values()) {
     const levels = surfaces.get(voxel.partId) ?? new Map<number, SurfaceLevel>();
     const occupiedY = voxel.cell.y, baseY = occupiedY + 1;
-    const level = levels.get(occupiedY) ?? { occupiedY, baseY, baseWithinBounds: baseY <= COORD_MAX,
+    const level = levels.get(occupiedY) ?? { occupiedY, baseY, baseWithinBounds: Number.isSafeInteger(baseY),
       columns: 0, baseCellOccupiedColumns: 0, columnsWithHigherOccupancy: 0 };
     level.columns++;
     if (occupied.has(positionKey({ ...voxel.cell, y: baseY }))) level.baseCellOccupiedColumns++;

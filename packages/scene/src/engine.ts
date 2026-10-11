@@ -62,7 +62,7 @@ export class VoxelEngine {
 
   static fromSnapshot(input: unknown): VoxelEngine {
     const snapshot = snapshotSchema.parse(input);
-    if (snapshot.voxels.length > MAX_SCENE_CELLS) throw new EngineError('SCENE_CAPACITY', '这座小岛超过40000块，请先缩小作品');
+    if (snapshot.voxels.length > MAX_SCENE_CELLS) throw new EngineError('SCENE_CAPACITY', `这座小岛超过${MAX_SCENE_CELLS}块，请先缩小作品`);
     const engine = new VoxelEngine();
     const parts = new Map(snapshot.parts.map(p => [p.id, p]));
     if (parts.size !== snapshot.parts.length) throw new EngineError('INVALID_SNAPSHOT', '部件编号重复');
@@ -187,7 +187,7 @@ export class VoxelEngine {
         if (!snapshotSchema.shape.parts.safeParse([...draft.parts.values()]).success) throw new EngineError('PART_CAPACITY', '小岛部件太多或编号无效，请先整理一下');
         if (!snapshotSchema.shape.groups.safeParse([...draft.groups.values()]).success) throw new EngineError('GROUP_CAPACITY', '小岛物件组太多或编号无效，请先整理一下');
         if (draft.voxels.touchedCount > MAX_BATCH_CELLS) throw new EngineError('BATCH_BUDGET', '一次最多修改16000块，请分批完成');
-        if (draft.voxels.size > MAX_SCENE_CELLS) throw new EngineError('SCENE_CAPACITY', '小岛最多容纳40000块，请先移除一些方块');
+        if (draft.voxels.size > MAX_SCENE_CELLS) throw new EngineError('SCENE_CAPACITY', `小岛最多容纳${MAX_SCENE_CELLS}块，请先移除一些方块`);
       }
     } catch (error) {
       this.nextId = idBefore;
@@ -276,16 +276,19 @@ export class VoxelEngine {
       const group = this.group(state, op.groupId);
       state.groups.set(group.id, { ...group, name: op.name }); return;
     }
-    if (op.op === 'translate_group' || op.op === 'paint_group' || op.op === 'remove_group') {
+    if (op.op === 'translate_group' || op.op === 'rotate_group' || op.op === 'paint_group' || op.op === 'remove_group') {
       this.group(state, op.groupId);
       const parts = [...state.parts.values()].filter(part => part.groupId === op.groupId);
       const voxels = parts.flatMap(part => state.voxels.forPart(part.id));
       if (voxels.length > MAX_BATCH_CELLS) throw new EngineError('BATCH_BUDGET', '单次修改超过 16000 块，整组操作未执行');
-      if (op.op === 'translate_group') {
-        const movedParts = parts.map(part => ({ ...part, origin: add(part.origin, op.delta) }));
+      if (op.op === 'translate_group' || op.op === 'rotate_group') {
+        const transform = (cell: Voxel['cell']) => op.op === 'translate_group'
+          ? add(cell, op.delta) : rotateCell(cell, op.axis, op.quarterTurns, op.pivot);
+        // Origins anchor local cell (0,0,0), so they use the same corner transform as voxels.
+        const movedParts = parts.map(part => ({ ...part, origin: transform(part.origin) }));
         for (const part of movedParts) assertCell(part.origin);
         // All member IDs form one moving set, so adjacent parts do not block each other.
-        this.move(state, voxels, voxel => ({ ...voxel, cell: add(voxel.cell, op.delta) }));
+        this.move(state, voxels, voxel => ({ ...voxel, cell: transform(voxel.cell) }));
         for (const part of movedParts) state.parts.set(part.id, part);
       } else if (op.op === 'paint_group') {
         for (const voxel of voxels) state.voxels.set(voxel.id, { ...voxel, color: op.color.toUpperCase() });
@@ -314,16 +317,20 @@ export class VoxelEngine {
       const part = this.part(state, op.partId);
       this.write(state, part.id, op.cells.map(c => ({ ...c, cell: add(part.origin, c.cell) }))); return;
     }
-    if (op.op === 'paint_part' || op.op === 'remove_region' || op.op === 'remove_part' || op.op === 'translate_part' || op.op === 'translate_region') {
+    if (op.op === 'paint_part' || op.op === 'remove_region' || op.op === 'remove_part' || op.op === 'translate_part' || op.op === 'rotate_part' || op.op === 'translate_region') {
       const part = this.part(state, op.partId);
       const region = 'region' in op ? op.region : null;
       if (region) assertRegion(region);
       const voxels = state.voxels.forPart(part.id).filter(v => !region || inRegion(v.cell, part.origin, region));
-      if (voxels.length > MAX_BATCH_CELLS) throw new EngineError('BATCH_BUDGET', '单次修改超过 16000 块，请用 region 或多个批次完成；小岛最多容纳40000块');
+      if (voxels.length > MAX_BATCH_CELLS) throw new EngineError('BATCH_BUDGET', `单次修改超过 ${MAX_BATCH_CELLS} 块，请用 region 或多个批次完成；小岛最多容纳${MAX_SCENE_CELLS}块`);
       if (op.op === 'paint_part') { for (const v of voxels) state.voxels.set(v.id, { ...v, color: op.color.toUpperCase() }); }
       else if (op.op === 'translate_part' || op.op === 'translate_region') {
         const origin = op.op === 'translate_part' ? add(part.origin, op.delta) : part.origin; assertCell(origin);
         this.move(state, voxels, v => ({ ...v, cell: add(v.cell, op.delta) }));
+        state.parts.set(part.id, { ...part, origin });
+      } else if (op.op === 'rotate_part') {
+        const origin = rotateCell(part.origin, op.axis, op.quarterTurns, op.pivot);
+        this.move(state, voxels, v => ({ ...v, cell: rotateCell(v.cell, op.axis, op.quarterTurns, op.pivot) }));
         state.parts.set(part.id, { ...part, origin });
       } else { for (const v of voxels) state.voxels.delete(v.id); if (op.op === 'remove_part') state.parts.delete(part.id); }
       return;
@@ -353,7 +360,7 @@ export class VoxelEngine {
       this.write(state, 'shape-body', [{ cell: op.cell, color }]); return;
     }
     const voxels = selected(state, op.voxelIds);
-    if (voxels.length > MAX_BATCH_CELLS) throw new EngineError('BATCH_BUDGET', '单次变换超过 16000 块，请分区执行；小岛最多容纳40000块');
+    if (voxels.length > MAX_BATCH_CELLS) throw new EngineError('BATCH_BUDGET', `单次变换超过 ${MAX_BATCH_CELLS} 块，请分区执行；小岛最多容纳${MAX_SCENE_CELLS}块`);
     if (op.op === 'remove') { for (const v of voxels) state.voxels.delete(v.id); return; }
     if (op.op === 'paint') { for (const v of voxels) state.voxels.set(v.id, { ...v, color: op.color.toUpperCase() }); return; }
     this.move(state, voxels, v => ({ ...v, cell: op.op === 'translate' ? add(v.cell, op.delta) : rotateCell(v.cell, op.axis, op.quarterTurns, op.pivot) }));

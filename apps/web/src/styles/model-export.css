@@ -1,0 +1,28 @@
+.model-export-dialog { width: min(560px, calc(100vw - 32px)); }
+.model-export-dialog .dialog-heading { margin-bottom: 18px; }
+.model-export-scope { margin: 20px 0 14px; padding: 0; border: 0; display: flex; flex-wrap: wrap; gap: 10px 22px; }
+.model-export-scope legend { margin-bottom: 12px; font-size: 14px; font-weight: 650; }
+.model-export-scope label, .model-export-check { display: flex; align-items: center; gap: 8px; font-size: 13px; cursor: pointer; }
+.model-export-dialog input[type=checkbox], .model-export-dialog input[type=radio] { accent-color: #718e50; width: 17px; height: 17px; flex-shrink: 0; }
+.model-export-selection { border: 1px solid #e5e4d9; border-radius: 14px; overflow: hidden; }
+.model-export-selection-actions { display: flex; justify-content: flex-end; padding: 3px 8px; border-bottom: 1px solid #e5e4d9; }
+.model-export-tree { max-height: 230px; overflow: auto; overscroll-behavior: contain; padding: 8px 14px; }
+.model-export-group + .model-export-group { border-top: 1px solid #ece9df; padding-top: 7px; margin-top: 7px; }
+.model-export-check { min-height: 32px; padding: 3px 0; }
+.model-export-check span { overflow-wrap: anywhere; }
+.model-export-group > .model-export-check { font-weight: 650; }
+.model-export-parts { padding-left: 22px; }
+.model-export-scale { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; margin: 20px 0 12px; font-size: 13px; }
+.model-export-scale > div { display: flex; align-items: center; gap: 7px; }
+.model-export-scale input { width: 94px; border: 1px solid #d8dccd; border-radius: 9px; padding: 9px; background: #fff; color: inherit; }
+.model-export-summary { display: grid; gap: 6px; padding: 15px; border-radius: 14px; background: #edf3e6; }
+.model-export-summary strong { font-size: 21px; overflow-wrap: anywhere; }
+.model-export-summary > span { font-size: 12px; color: #63744f; }
+.model-export-colors { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; margin-top: 4px; }
+.model-export-colors i { width: 15px; height: 15px; border-radius: 5px; border: 1px solid #0002; }
+.model-export-colors span { font-size: 11px; }
+.model-export-warning { font-size: 12px; line-height: 1.7; color: #8a532d; margin: 9px 0 0; }
+.model-export-help { font-size: 12px; line-height: 1.8; color: #807866; margin: 13px 0; }
+.model-export-message { font-size: 13px; line-height: 1.7; color: #527040; }
+.model-export-footer { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin-top: 18px; }
+.model-export-footer .secondary-button { min-height: 44px; padding: 10px 17px; background: #e7eddb; color: #4b6337; }

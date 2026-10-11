@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { VoxelEngine } from '../../../packages/scene/src/index.ts';
+import { VoxelEngine, createInitialScene } from '../../../packages/scene/src/index.ts';
 import { snapshotDigest, type SceneBatch } from '../../../packages/protocol/src/index.ts';
 import { createApp } from '../src/app.ts';
 import type { ApiConfig } from '../src/config.ts';
@@ -38,10 +38,27 @@ function events(source: string): Array<{ event: string; data: Record<string, unk
 test('health reports capabilities without credentials; cross-origin and invalid Host are rejected', async (t) => {
   const app = createApp(config, { providers: fixtures() }); t.after(() => app.close());
   const health = await app.inject({ method: 'GET', url: '/api/health', headers });
-  assert.deepEqual(health.json(), { ok: true, model: 'deepseek-flash', aiConfigured: true, asrConfigured: true, ttsConfigured: true });
+  assert.deepEqual(health.json(), { ok: true, model: 'deepseek-flash', aiConfigured: true, asrConfigured: true, ttsConfigured: true, thinking: 'enabled', reasoningEffort: 'high' });
   assert.ok(!health.body.includes('key'));
   assert.equal((await app.inject({ method: 'GET', url: '/api/health', headers: { host: 'evil.example' } })).statusCode, 403);
   assert.equal((await app.inject({ method: 'GET', url: '/api/health', headers: { ...headers, origin: 'https://evil.example' } })).statusCode, 403);
+});
+
+test('large editable starter landscape reaches the planner above the old 8 MiB request limit', async (t) => {
+  const large = createInitialScene();
+  let received = 0;
+  const app = createApp(config, { providers: fixtures({ plan: async request => {
+    received = request.snapshot.voxels.length;
+    return { reply: '这里有足够的空间，开始创造吧。' };
+  } }) });
+  t.after(() => app.close());
+  const payload = JSON.stringify({ ...input, requestId: 'large-landscape-turn', snapshot: large });
+  assert.ok(Buffer.byteLength(payload) > 8 * 1024 * 1024);
+  const response = await app.inject({ method: 'POST', url: '/api/chat', payload,
+    headers: { ...headers, 'content-type': 'application/json' } });
+  assert.equal(response.statusCode, 200);
+  assert.equal(received, large.voxels.length);
+  assert.ok(events(response.body).some(event => event.event === 'done'));
 });
 
 test('scene plan needs the exact local revision and digest ACK before speech; duplicate submission is idempotent', async (t) => {
@@ -163,23 +180,27 @@ test('MiMo adapters use official WAV contracts; provider failures never echo res
   await assert.rejects(() => denied.transcribe(wavFixture(), new AbortController().signal), (error: unknown) => error instanceof ApiError && error.code === 'PROVIDER_ACCESS' && !error.message.includes('private'));
 });
 
-test('DeepSeek can return one validated tool or a conversational reply; truncated calls are never retried', async () => {
-  const tool = { id: 'model-issued-call-1', type: 'function', function: { name: 'apply_scene', arguments: JSON.stringify({ operations: batch.operations, reply: replyText }) } };
+test('DeepSeek can return one validated tool or a conversational reply; truncated calls get exactly one larger-output recovery', async () => {
+  const tool = { id: 'model-issued-call-1', type: 'function', function: { name: 'apply_scene', arguments: JSON.stringify({ operations: [], creations: [{ operations: batch.operations, placement: { mode: 'absolute', position: { x: 0, y: 0, z: 0 } } }], reply: replyText }) } };
   const responses = [
     { choices: [{ finish_reason: 'tool_calls', message: { content: null, tool_calls: [tool] } }] },
     { choices: [{ finish_reason: 'stop', message: { content: '你好，想造什么呢？', tool_calls: null } }] },
+    { choices: [{ finish_reason: 'tool_calls', message: { content: null, tool_calls: [{ id: 'intent-call', type: 'function', function: { name: 'classify_intent', arguments: JSON.stringify({ kind: 'chat', reply: '你好，想造什么呢？' }) } }] } }] },
+    { choices: [{ finish_reason: 'length', message: { content: null, tool_calls: [tool] } }] },
     { choices: [{ finish_reason: 'length', message: { content: null, tool_calls: [tool] } }] },
   ];
   const providers = createProviders(config, async (_url, init) => {
     const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
-    assert.equal(body.stream, false);
-    assert.deepEqual(body.thinking, { type: 'disabled' });
+    const intent = (body.tool_choice as { function?: { name?: string } })?.function?.name === 'classify_intent';
+    assert.equal(body.stream, !intent);
+    assert.deepEqual(body.thinking, { type: intent ? 'disabled' : 'enabled' });
+    if (!intent) { assert.equal(body.reasoning_effort, 'high'); assert.equal(body.max_tokens, responses.length === 1 ? 65536 : 32768); }
     return Response.json(responses.shift());
   });
   const signal = new AbortController().signal;
   assert.deepEqual(await providers.plan(input, signal), { batch, reply: replyText });
-  assert.deepEqual(await providers.plan(input, signal), { reply: '你好，想造什么呢？' });
-  await assert.rejects(() => providers.plan(input, signal), (error: unknown) => error instanceof ApiError && error.code === 'INVALID_PLAN');
+  assert.deepEqual(await providers.plan({ ...input, text: '你好' }, signal), { reply: '你好，想造什么呢？' });
+  await assert.rejects(() => providers.plan(input, signal), (error: unknown) => error instanceof ApiError && error.code === 'PLAN_TRUNCATED');
   assert.equal(responses.length, 0);
 });
 
@@ -195,7 +216,8 @@ test('every subsequent model call consumes the session rate limit; progress is p
   } }) }); t.after(() => app.close());
   for (let turn = 0; turn < 4; turn++) {
     const response = await app.inject({ method: 'POST', url: '/api/chat', headers, payload: { ...input, requestId: `fixture-rate-turn-${turn}` } });
-    assert.equal(events(response.body).filter(event => event.event === 'status' && event.data.message === '正在调整搭建方法…').length, 5);
+    assert.ok(events(response.body).some(event => event.event === 'status' && event.data.phase === 'thinking'));
+    assert.equal(events(response.body).filter(event => event.event === 'reply').length, 1);
   }
   const limited = await app.inject({ method: 'POST', url: '/api/chat', headers, payload: { ...input, requestId: 'fixture-rate-turn-5' } });
   assert.equal(limited.statusCode, 429);

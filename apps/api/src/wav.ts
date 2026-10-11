@@ -1,11 +1,12 @@
 import { ApiError } from './errors.ts';
+import { MAX_RECORDING_SECONDS } from '../../../packages/protocol/src/voice.ts';
 
-export const MAX_RECORDING_SECONDS = 30;
-export const MAX_WAV_BYTES = 1_048_576;
+export { MAX_RECORDING_SECONDS };
+export const MAX_WAV_BYTES = 44 + 32_000 * MAX_RECORDING_SECONDS;
 
 /** Validate sample count, not caller-provided duration, before uploading any audio. */
 export function validateRecording(audio: Buffer): void {
-  const invalid = () => new ApiError('INVALID_AUDIO', 400, '请使用不超过 30 秒的单声道 16 kHz WAV 录音。');
+  const invalid = () => new ApiError('INVALID_AUDIO', 400, `请使用不超过 ${MAX_RECORDING_SECONDS} 秒的单声道 16 kHz WAV 录音。`);
   if (audio.length < 44 || audio.length > MAX_WAV_BYTES || audio.toString('ascii', 0, 4) !== 'RIFF'
     || audio.toString('ascii', 8, 12) !== 'WAVE' || audio.readUInt32LE(4) !== audio.length - 8) throw invalid();
   let formatSeen = false;

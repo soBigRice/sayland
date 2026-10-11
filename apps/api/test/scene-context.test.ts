@@ -148,8 +148,8 @@ test('pagination returns every sparse occupied cell exactly once with no hidden 
 test('invalid coordinates, inverted or oversized regions and invalid offsets fail explicitly', () => {
   const scene = elevatedScene();
   const invalid: unknown[] = [
-    query({ x: -129, y: 0, z: 0 }, { x: 0, y: 0, z: 0 }),
-    query({ x: 0, y: 0, z: 0 }, { x: 129, y: 0, z: 0 }),
+    query({ x: Number.MIN_SAFE_INTEGER - 1, y: 0, z: 0 }, { x: 0, y: 0, z: 0 }),
+    query({ x: 0, y: 0, z: 0 }, { x: Number.MAX_SAFE_INTEGER + 1, y: 0, z: 0 }),
     query({ x: 0.5, y: 0, z: 0 }, { x: 1, y: 0, z: 0 }),
     query({ x: 1, y: 0, z: 0 }, { x: 0, y: 0, z: 0 }),
     query({ x: 0, y: 0, z: 0 }, { x: 64, y: 0, z: 0 }),
@@ -182,14 +182,21 @@ test('empty scenes invent neither surfaces nor occupied geometry', () => {
   assert.equal(result.complete, true); assert.equal(result.nextOffset, null);
 });
 
-test('bounded summary lists disclose omitted colors and surface levels and reject an out-of-world base', () => {
+test('world queries and surface summaries accept finite distant cells without an artificial world ceiling', () => {
+  const position = { x: 500, y: 1000, z: -200 };
+  const source = snapshot([part('distant', 'terrain')], [voxel(1, 'distant', position)]);
+  assert.equal(inspectScene(source, query(position, position)).occupiedVoxelCount, 1);
+  assert.equal(summary(source).parts[0].surface!.levels[0].baseWithinBounds, true);
+});
+
+test('bounded summary lists disclose omitted colors and surface levels and flag a numerically unsafe base', () => {
   const voxels = Array.from({ length: 9 }, (_, index) => voxel(index + 1, 'stairs', { x: index, y: index, z: 0 }, `#${index.toString(16).padStart(6, '0')}`));
-  voxels.push(voxel(10, 'ceiling', { x: 20, y: 128, z: 0 }));
+  voxels.push(voxel(10, 'ceiling', { x: 20, y: Number.MAX_SAFE_INTEGER, z: 0 }));
   const scene = snapshot([part('stairs', 'terrain'), part('ceiling', 'water')], voxels);
   const result = summary(scene);
   const stairs = result.parts.find(p => p.id === 'stairs')!;
   assert.equal(stairs.totalColors, 9); assert.equal(stairs.colorsComplete, false); assert.equal(stairs.colors.length, 8);
   assert.equal(stairs.surface!.levelCount, 9); assert.equal(stairs.surface!.levelsComplete, false); assert.equal(stairs.surface!.levels.length, 8);
   const ceiling = result.parts.find(p => p.id === 'ceiling')!;
-  assert.equal(ceiling.surface!.levels[0].baseY, 129); assert.equal(ceiling.surface!.levels[0].baseWithinBounds, false);
+  assert.equal(ceiling.surface!.levels[0].baseY, Number.MAX_SAFE_INTEGER + 1); assert.equal(ceiling.surface!.levels[0].baseWithinBounds, false);
 });

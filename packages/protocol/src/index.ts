@@ -1,12 +1,16 @@
 import { z } from 'zod';
-export const COORD_MIN = -128;
-export const COORD_MAX = 128;
 export const MAX_BATCH_CELLS = 16000;
 export const MAX_CANDIDATE_CELLS = 64000;
-export const MAX_SCENE_VOXELS = 40000;
+export const MAX_SCENE_VOXELS = 500000;
+// A full editable landscape travels with the next turn; keep transport and file import usable at this scale.
+export const MAX_SCENE_REQUEST_BYTES = 96 * 1024 * 1024;
+export const MAX_PROJECT_FILE_BYTES = 128 * 1024 * 1024;
 export const MAX_SCENE_GROUPS = 512;
 
-const integer = z.number().int('必须是整数').min(COORD_MIN).max(COORD_MAX);
+// Coordinates are numeric values, not a bounded play area. Zod 4 int rejects
+// non-finite, fractional and unsafe integers; geometry work has separate budgets.
+export const coordinateSchema = z.number().int('坐标必须是有限安全整数');
+const integer = coordinateSchema;
 export const vecSchema = z.object({ x: integer, y: integer, z: integer }).strict();
 const dimension = z.number().int('尺寸必须是整数').min(1, '尺寸至少为 1').max(64, '单轴尺寸最多为 64');
 export const sizeSchema = z.object({ x: dimension, y: dimension, z: dimension }).strict();
@@ -31,6 +35,11 @@ const paletteEntrySchema = z.object({ symbol: z.string().regex(/^[A-Za-z0-9]$/, 
 const layerSchema = z.object({ y: z.number().int().min(0).max(63), rows: z.array(z.string().min(1).max(64).regex(/^[.A-Za-z0-9]+$/)).min(1).max(64) }).strict();
 const regionSchema = z.object({ min: vecSchema, max: vecSchema }).strict();
 const quarterTurns = z.union([z.literal(-3), z.literal(-2), z.literal(-1), z.literal(1), z.literal(2), z.literal(3)]);
+const objectRotation = {
+  axis: z.enum(['x', 'y', 'z']).describe('世界旋转轴；小船水平转向使用 y'),
+  quarterTurns: quarterTurns.describe('带符号的90度次数，正值按右手规则；仅支持±1、±2、±3'),
+  pivot: vecSchema.describe('旋转中心的整数世界坐标，不是部件局部偏移；选择目标附近的格点'),
+};
 // Contours handle dense bulk geometry; layers/cells retain arbitrary detail geometry.
 export const aiOperationSchema = z.discriminatedUnion('op', [
   z.object({ op: z.literal('add_prefab'), prefab: z.enum(['tree', 'house', 'duck', 'flowers', 'river']), origin: vecSchema, id: partIdSchema, name: z.string().min(1).max(80) }).strict(),
@@ -39,6 +48,7 @@ export const aiOperationSchema = z.discriminatedUnion('op', [
   z.object({ op: z.literal('assign_part_group'), partId: partIdSchema, groupId: groupIdSchema.nullable() }).strict(),
   z.object({ op: z.literal('rename_group'), groupId: groupIdSchema, name: z.string().min(1).max(80) }).strict(),
   z.object({ op: z.literal('translate_group'), groupId: groupIdSchema, delta: vecSchema }).strict(),
+  z.object({ op: z.literal('rotate_group'), groupId: groupIdSchema, ...objectRotation }).strict(),
   z.object({ op: z.literal('paint_group'), groupId: groupIdSchema, color: colorSchema }).strict(),
   z.object({ op: z.literal('remove_group'), groupId: groupIdSchema }).strict(),
   z.object({ op: z.literal('define_part'), part: partSchema }).strict(),
@@ -50,6 +60,7 @@ export const aiOperationSchema = z.discriminatedUnion('op', [
   z.object({ op: z.literal('remove_region'), partId: partIdSchema, region: regionSchema }).strict(),
   z.object({ op: z.literal('translate_region'), partId: partIdSchema, region: regionSchema, delta: vecSchema }).strict(),
   z.object({ op: z.literal('translate_part'), partId: partIdSchema, delta: vecSchema }).strict(),
+  z.object({ op: z.literal('rotate_part'), partId: partIdSchema, ...objectRotation }).strict(),
   z.object({ op: z.literal('remove_part'), partId: partIdSchema }).strict(),
 ]);
 export type Part = z.infer<typeof partSchema>;
@@ -88,8 +99,25 @@ export const chatRequestSchema = z.object({
   messages: z.array(z.object({role:z.enum(['user','assistant']),content:z.string().max(3000)}).strict()).max(12).default([]),
 }).strict();
 export type ChatRequest = z.infer<typeof chatRequestSchema>;
-export interface ScenePlan { requestId: string; batch: SceneBatch; reply: string }
-export interface ServiceHealth { ok: boolean; model: string; aiConfigured: boolean; asrConfigured: boolean; ttsConfigured: boolean }
+export interface ScenePlan {
+  /** One conversation/undo group; batchId is the idempotency key for each commit. */
+  requestId: string;
+  /** Absent only for legacy single-plan clients/fixtures. */
+  batchId?: string;
+  batch: SceneBatch;
+  /** Progress for this batch, not proof that the full request is finished. */
+  reply: string;
+}
+export interface SceneReceipt {
+  requestId: string;
+  batchId?: string;
+  status: 'committed';
+  revision: number;
+  digest?: string;
+  reply: string;
+}
+export interface SceneCommentary { requestId: string; messageId: string; text: string }
+export interface ServiceHealth { ok: boolean; model: string; aiConfigured: boolean; asrConfigured: boolean; ttsConfigured: boolean; thinking?: 'enabled'; reasoningEffort?: 'high' }
 
 // Canonical JSON makes a real browser commit comparable with the server preflight.
 // Sorting IDs preserves semantics even when runtime storage has a different order.

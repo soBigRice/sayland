@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { MAX_RECORDING_SECONDS } from '../../../../packages/protocol/src/voice.ts';
 
 interface Capture {
   stream: MediaStream; context: AudioContext; source: MediaStreamAudioSourceNode;
@@ -7,6 +8,7 @@ interface Capture {
 }
 export function useRecorder(onLimit: () => void) {
   const active = useRef<Capture | null>(null);
+  const pending = useRef<{ stream?: MediaStream; context?: AudioContext } | null>(null);
   const starting = useRef(false), generation = useRef(0), limit = useRef(onLimit);
   limit.current = onLimit;
   const [recording, setRecording] = useState(false);
@@ -19,6 +21,9 @@ export function useRecorder(onLimit: () => void) {
   }, []);
   const cancel = useCallback(() => {
     generation.current++;
+    pending.current?.stream?.getTracks().forEach(track => track.stop());
+    const context = pending.current?.context;
+    if (context && context.state !== 'closed') void context.close().catch(() => undefined);
     const capture = active.current; active.current = null;
     if (capture) { capture.flush?.(); release(capture); }
     setRecording(false); setElapsed(0);
@@ -27,12 +32,16 @@ export function useRecorder(onLimit: () => void) {
     if (active.current || starting.current) return false;
     if (!navigator.mediaDevices?.getUserMedia || !globalThis.AudioWorkletNode) throw new Error('这个浏览器暂不支持录音，可以先打字创作。');
     starting.current = true; const id = ++generation.current;
+    const resources: NonNullable<typeof pending.current> = {}; pending.current = resources;
     let stream: MediaStream | null = null, context: AudioContext | null = null;
     try {
       stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+      resources.stream = stream;
       if (generation.current !== id) { stream.getTracks().forEach(t => t.stop()); return false; }
       context = new AudioContext();
+      resources.context = context;
       await context.audioWorklet.addModule('/recorder.worklet.js');
+      if (generation.current !== id) return false;
       await context.resume();
       if (generation.current !== id) { stream.getTracks().forEach(t => t.stop()); await context.close(); return false; }
       const source = context.createMediaStreamSource(stream);
@@ -42,17 +51,20 @@ export function useRecorder(onLimit: () => void) {
       const started = performance.now();
       const capture: Capture = { stream, context, source, node, gain, chunks: [], frames: 0, timer: setInterval(() => {
         const seconds = Math.floor((performance.now() - started) / 1000); setElapsed(seconds);
-        if (seconds >= 20) { clearInterval(capture.timer); limit.current(); }
+        if (seconds >= MAX_RECORDING_SECONDS) { clearInterval(capture.timer); limit.current(); }
       }, 250) };
       node.port.onmessage = ({ data }: MessageEvent<{ type: string; samples?: Float32Array }>) => {
         if (data.type === 'flushed') capture.flush?.();
-        if (data.samples && capture.frames < context!.sampleRate * 22) { capture.chunks.push(data.samples); capture.frames += data.samples.length; }
+        if (data.samples) {
+          const remaining = context!.sampleRate * MAX_RECORDING_SECONDS - capture.frames;
+          if (remaining > 0) { const samples = data.samples.slice(0, remaining); capture.chunks.push(samples); capture.frames += samples.length; }
+        }
       };
       active.current = capture; setElapsed(0); setRecording(true); return true;
     } catch (error) {
       stream?.getTracks().forEach(t => t.stop()); if (context && context.state !== 'closed') await context.close();
       throw error instanceof DOMException && error.name === 'NotAllowedError' ? new Error('没有获得麦克风权限。允许录音后再试，或直接打字。') : error;
-    } finally { starting.current = false; }
+    } finally { starting.current = false; if (pending.current === resources) pending.current = null; }
   }, []);
   const stop = useCallback(async (): Promise<Blob | null> => {
     const capture = active.current;
@@ -82,5 +94,5 @@ export function useRecorder(onLimit: () => void) {
     } finally { release(capture); setElapsed(0); }
   }, [release]);
   useEffect(() => cancel, [cancel]);
-  return { recording, elapsed, start, stop, cancel };
+  return { recording, elapsed, start, stop, cancel, isRecording: () => active.current !== null };
 }

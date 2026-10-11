@@ -11,7 +11,7 @@ import { FXAAPass } from 'three/addons/postprocessing/FXAAPass.js';
 class VoxelGTAOPass extends GTAOPass {
   override render(renderer: WebGLRenderer, writeBuffer: WebGLRenderTarget, readBuffer: WebGLRenderTarget, deltaTime: number, maskActive: boolean) {
     const overlays: Mesh[] = [];
-    // The contact-shadow receiver and pick highlight are overlays, not solid occluders.
+    // The transparent contact-shadow receiver is an overlay, not a solid occluder.
     // Beauty has already been rendered; only exclude them from GTAO's depth/normal pass.
     this.scene.traverseVisible(object => {
       if (!(object instanceof Mesh)) return;

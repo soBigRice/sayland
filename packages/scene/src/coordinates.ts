@@ -1,12 +1,15 @@
 export type Vec3 = Readonly<{ x: number; y: number; z: number }>;
 export const CHUNK_SIZE = 16;
-import { COORD_MIN, COORD_MAX, MAX_BATCH_CELLS, MAX_CANDIDATE_CELLS, MAX_SCENE_VOXELS } from '../../protocol/src/index.ts';
-export { COORD_MIN, COORD_MAX, MAX_BATCH_CELLS, MAX_CANDIDATE_CELLS };
+import { MAX_BATCH_CELLS, MAX_CANDIDATE_CELLS, MAX_SCENE_VOXELS } from '../../protocol/src/index.ts';
+export { MAX_BATCH_CELLS, MAX_CANDIDATE_CELLS };
 export const MAX_SCENE_CELLS = MAX_SCENE_VOXELS;
 
 export const cellKey = (p: Vec3): string => `${p.x},${p.y},${p.z}`;
 export const cellCenter = (p: Vec3): Vec3 => ({ x: p.x + 0.5, y: p.y + 0.5, z: p.z + 0.5 });
-export const add = (a: Vec3, b: Vec3): Vec3 => ({ x: a.x + b.x, y: a.y + b.y, z: a.z + b.z });
+export const add = (a: Vec3, b: Vec3): Vec3 => {
+  const result = { x: a.x + b.x, y: a.y + b.y, z: a.z + b.z };
+  assertCell(result); return result;
+};
 
 // Cell coordinates name the minimum corner. floor is essential for negative chunks.
 export function chunkAddress(p: Vec3): { key: string; origin: Vec3; local: Vec3 } {
@@ -17,8 +20,8 @@ export function chunkAddress(p: Vec3): { key: string; origin: Vec3; local: Vec3 
 
 export function assertCell(p: Vec3): void {
   for (const value of [p.x, p.y, p.z]) {
-    if (!Number.isSafeInteger(value) || value < COORD_MIN || value > COORD_MAX) {
-      throw new Error(`方块坐标超出小岛范围（-128 到 128），请移近一点`);
+    if (!Number.isSafeInteger(value)) {
+      throw new Error(`方块坐标必须是有限安全整数，运算不能失去整数精度`);
     }
   }
 }

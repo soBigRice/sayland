@@ -1,9 +1,10 @@
 import { createApp } from './app.ts';
 import { loadConfig } from './config.ts';
+import { resolve } from 'node:path';
 
 async function main(): Promise<void> {
   const config = loadConfig();
-  const app = createApp(config);
+  const app = createApp(config, { databasePath: resolve(process.cwd(), '.sayland/workspace.sqlite') });
   let closing = false;
   async function close(): Promise<void> {
     if (closing) return;

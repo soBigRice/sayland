@@ -36,6 +36,13 @@ export interface PlanDiagnostic {
   partIds?: string[];
   partCount?: number;
   partIdsComplete?: boolean;
+  budget?: {
+    scope: 'tokens' | 'content' | 'frame' | 'transport';
+    unit: 'tokens' | 'bytes';
+    limit: number | null;
+    observed?: number;
+    modelCall: number;
+  };
   conflict?: {
     cell: Vec3;
     targetPartId?: string;
@@ -52,6 +59,12 @@ export interface PlanTrace {
   queryCalls: number;
   applyAttempts: number;
   failures: PlanDiagnostic[];
+  committedBatches?: number;
+  readRegionCalls?: number;
+  viewCalls?: number;
+  automaticViewPasses?: number;
+  automaticViewImages?: number;
+  currentRevision?: number;
 }
 
 export class ApiError extends Error {
@@ -81,6 +94,10 @@ export function planningError(diagnostic: PlanDiagnostic): ApiError {
     GROUP_EXISTS: '我给新物件分配的编号重复了，这次没有改动作品。',
     GROUP_CAPACITY: '这次计划超过当前世界的物件组容量，尚未改动作品。',
     PLANNING_LIMIT: '我还没在这轮时间内安排好完整的搭建步骤，作品保持原样。',
+    TRUNCATED: '这批搭建步骤还没传完整，本批没有提交。',
+    OUTPUT_BUDGET: '这批搭建步骤太长，暂时没能拆分完成，本批没有提交。',
+    RESPONSE_FRAME_BUDGET: '这批搭建步骤的传输格式异常，本批没有提交。',
+    TRANSPORT_BUDGET: '这批搭建步骤的传输量异常，本批没有提交。',
   };
   return new ApiError(`PLAN_${diagnostic.code}`, 502,
     messages[diagnostic.code] ?? '我还没把完整的搭建步骤检查好，这次没有改动作品。', diagnostic);

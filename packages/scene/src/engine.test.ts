@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { VoxelEngine } from './engine.ts';
 import { createInitialScene } from './initialScene.ts';
-import { canonicalSnapshotJson, snapshotDigest, type Operation, type SceneBatch } from '../../protocol/src/index.ts';
+import { canonicalSnapshotJson, snapshotDigest, vecSchema, MAX_SCENE_VOXELS, type Operation, type SceneBatch } from '../../protocol/src/index.ts';
 
 const apply = (engine: VoxelEngine, operations: Operation[], id: string = crypto.randomUUID(), group?: string) => engine.executeBatch({ protocolVersion: 1, baseRevision: engine.snapshot().revision, operations }, id, group);
 const part = (id = 'test'): Operation => ({ op: 'define_part', part: { id, name: '测试部件', role: 'other', origin: { x: 0, y: 0, z: 0 } } });
@@ -10,7 +10,18 @@ const cell = (x: number, partId = 'test', color = '#FFAA00'): Operation => ({ op
 
 test('starter island is deterministic editable data with independent roof, flora and water', () => {
   const scene = createInitialScene();
-  assert.ok(scene.voxels.length >= 6000 && scene.voxels.length <= 12000);
+  // Full soil and water depth must leave substantial capacity for the child's own creations.
+  assert.ok(scene.voxels.length <= MAX_SCENE_VOXELS - 380000);
+  const grass = scene.voxels.filter(v => v.partId === 'island-grass');
+  const water = scene.voxels.filter(v => v.partId === 'lagoon' && v.cell.y === 0);
+  assert.ok(grass.length >= 8500 && water.length >= 9000, 'broad land and water must be actual editable surfaces');
+  assert.equal(Math.max(...water.map(v => v.cell.x)) - Math.min(...water.map(v => v.cell.x)) + 1, 144);
+  assert.equal(Math.max(...water.map(v => v.cell.z)) - Math.min(...water.map(v => v.cell.z)) + 1, 128);
+  assert.equal(Math.max(...grass.map(v => v.cell.x)) - Math.min(...grass.map(v => v.cell.x)) + 1, 112);
+  const plain = grass.filter(v => v.cell.z <= 6);
+  assert.equal(Math.max(...plain.map(v => v.cell.z)) - Math.min(...plain.map(v => v.cell.z)) + 1, 80);
+  const occupied = new Set(scene.voxels.map(v => `${v.cell.x},${v.cell.y},${v.cell.z}`));
+  assert.ok(grass.filter(v => !occupied.has(`${v.cell.x},${v.cell.y + 1},${v.cell.z}`)).length >= 8500, 'keep open ground around the starter buildings');
   assert.deepEqual(scene, createInitialScene());
   assert.equal(new Set(scene.voxels.map(v => `${v.cell.x},${v.cell.y},${v.cell.z}`)).size, scene.voxels.length);
   assert.ok(scene.parts.some(p => p.id === 'home-roof' && p.role === 'roof'));
@@ -78,18 +89,54 @@ test('prefabs are ordinary parts, reject occupied cells and support local edits'
 test('coordinate expansion, per-batch work and candidate limits fail atomically', () => {
   const engine = new VoxelEngine(); apply(engine, [part()]);
   const before = engine.snapshot();
-  assert.throws(() => apply(engine, [{ op: 'fill_shape', partId: 'test', shape: { kind: 'box', offset: { x: 127, y: 0, z: 0 }, size: { x: 3, y: 1, z: 1 } }, color: '#FFFFFF' }]), /范围/);
+  assert.throws(() => apply(engine, [{ op: 'fill_shape', partId: 'test', shape: { kind: 'box', offset: { x: Number.MAX_SAFE_INTEGER, y: 0, z: 0 }, size: { x: 3, y: 1, z: 1 } }, color: '#FFFFFF' }]), /精度/);
   assert.throws(() => apply(engine, [{ op: 'fill_shape', partId: 'test', shape: { kind: 'box', offset: { x: 0, y: 0, z: 0 }, size: { x: 26, y: 26, z: 24 } }, color: '#FFFFFF' }]), /16000/);
   assert.throws(() => apply(engine, [{ op: 'fill_shape', partId: 'test', shape: { kind: 'box', offset: { x: 0, y: 0, z: 0 }, size: { x: 41, y: 41, z: 41 } }, color: '#FFFFFF' }]), /候选/);
   assert.deepEqual(engine.snapshot(), before);
 });
 
+test('distant free geometry, large local offsets and translations survive saves and undo without migration', async () => {
+  const engine = new VoxelEngine();
+  const position = { x: 500, y: -200, z: 1000 };
+  apply(engine, [part(), { op: 'fill_shape', partId: 'test', shape: { kind: 'box', offset: position,
+    size: { x: 2, y: 1, z: 1 } }, color: '#AA7733' }], 'far-create');
+  const created = engine.snapshot();
+  assert.deepEqual(created.voxels.map(voxel => voxel.cell), [position, { ...position, x: 501 }]);
+  apply(engine, [{ op: 'translate_part', partId: 'test', delta: { x: -1000, y: 500, z: 2000 } }], 'far-move');
+  const moved = engine.snapshot();
+  assert.deepEqual(moved.voxels[0].cell, { x: -500, y: 300, z: 3000 });
+  const saved = JSON.parse(JSON.stringify(engine.serialize()));
+  assert.equal(saved.version, 1); assert.equal(saved.snapshot.schemaVersion, 2);
+  const restored = VoxelEngine.restore(saved);
+  assert.equal(await snapshotDigest(restored.snapshot()), await snapshotDigest(moved));
+  assert.equal(await snapshotDigest(VoxelEngine.fromSnapshot(moved).snapshot()), await snapshotDigest(moved));
+  restored.undo(); assert.deepEqual(restored.snapshot().voxels, created.voxels);
+  restored.redo(); assert.deepEqual(restored.snapshot().voxels, moved.voxels);
+});
+
+test('coordinates reject non-finite, fractional and unsafe numbers and arithmetic overflow atomically', () => {
+  for (const x of [NaN, Infinity, -Infinity, 0.25, Number.MAX_SAFE_INTEGER + 1, Number.MIN_SAFE_INTEGER - 1]) {
+    assert.equal(vecSchema.safeParse({ x, y: 0, z: 0 }).success, false);
+  }
+  const engine = new VoxelEngine();
+  apply(engine, [{ op: 'define_part', part: { id: 'test', name: '测试', role: 'detail', origin: { x: Number.MAX_SAFE_INTEGER, y: 0, z: 0 } } }, cell(0)]);
+  const before = engine.serialize();
+  assert.throws(() => apply(engine, [cell(1)]), /精度/);
+  assert.throws(() => apply(engine, [{ op: 'translate_part', partId: 'test', delta: { x: 1, y: 0, z: 0 } }]), /精度/);
+  assert.deepEqual(engine.serialize(), before);
+});
+
 test('scene capacity is checked across individually legal batches', () => {
-  const engine = new VoxelEngine(); apply(engine, [part()]);
-  const fill = (x: number): Operation => ({ op: 'fill_shape', partId: 'test', shape: { kind: 'box', offset: { x, y: 0, z: 0 }, size: { x: 20, y: 20, z: 40 } }, color: '#FFFFFF' });
-  apply(engine, [fill(0)]); apply(engine, [fill(20)]);
-  const before = engine.snapshot(); assert.equal(engine.count, 32000);
-  assert.throws(() => apply(engine, [fill(40)]), /40000/);
+  const seed = new VoxelEngine(); apply(seed, [part()]);
+  const snapshot = seed.snapshot();
+  snapshot.voxels = Array.from({ length: MAX_SCENE_VOXELS - 2 }, (_, index) => ({
+    id: index + 1, partId: 'test', cell: { x: index, y: 0, z: 0 }, color: '#FFFFFF',
+  }));
+  snapshot.nextVoxelId = MAX_SCENE_VOXELS - 1;
+  const engine = VoxelEngine.fromSnapshot(snapshot);
+  apply(engine, [cell(MAX_SCENE_VOXELS - 2)]); apply(engine, [cell(MAX_SCENE_VOXELS - 1)]);
+  const before = engine.snapshot(); assert.equal(engine.count, MAX_SCENE_VOXELS);
+  assert.throws(() => apply(engine, [cell(MAX_SCENE_VOXELS)]), { code: 'SCENE_CAPACITY' });
   assert.deepEqual(engine.snapshot(), before);
 });
 

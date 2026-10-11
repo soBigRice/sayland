@@ -1,0 +1,141 @@
+/* The character and speech bubble share one stable dock; neither is part of the 3D scene. */
+.composer-area { min-width: 0; width: 100%; position: relative; display: grid; gap: 10px; }
+.voice-composer { display: grid; grid-template-columns: minmax(0, 1fr) var(--companion-size); align-items: end; gap: var(--companion-gap); pointer-events: none; }
+.voice-composer > * { pointer-events: auto; }
+.companion-record { grid-column: 2; grid-row: 1; position: relative; display: flex; flex-direction: column; align-items: center; justify-content: flex-end; align-self: end; width: 100%; padding: 0 0 2px; background: transparent; border-radius: 24px; color: #746340; touch-action: none; user-select: none; -webkit-touch-callout: none; }
+.companion-record:disabled { opacity: 1; }
+.companion-record:not(:disabled):hover .island-companion { transform: translateY(-3px) rotate(-3deg); }
+.island-companion { display: block; width: 100%; height: auto; overflow: visible; transition: transform .2s ease; }
+.companion-record-label { display: inline-flex; align-items: center; justify-content: center; gap: 5px; min-height: 24px; padding: 3px 9px; border: 1px solid #ffffffbf; border-radius: 20px; background: #fff9e9ed; box-shadow: 0 2px 8px #8969220a; font-size: 12px; font-weight: 650; white-space: nowrap; }
+.composer-recording .companion-record-label { color: #b95032; background: #fff0e7; }
+.composer-bubble { grid-column: 1; grid-row: 1; position: relative; display: grid; gap: 6px; min-width: 0; padding: 8px 14px 10px; background: var(--color-surface); border: 1px solid #fff; border-radius: 22px 22px 8px 22px; box-shadow: 0 8px 28px #656b3510, 0 2px 7px #655c3a05; }
+.composer-bubble::before { content: ''; position: absolute; right: -12px; bottom: 27px; width: 14px; height: 21px; background: var(--color-surface); clip-path: polygon(0 0, 0 100%, 100% 88%); }
+.composer-bubble:focus-within { box-shadow: 0 0 0 2px #e2e9cc, 0 9px 30px #656b3510; }
+/* Reserve the same entry height for typing, microphone permission, recording and building. */
+.composer-entry { display: flex; align-items: center; gap: 12px; min-width: 0; min-height: 80px; }
+.companion-dialogue + .composer-entry { border-top: 1px solid var(--color-line); padding-top: 8px; }
+.companion-dialogue { min-width: 0; display: flex; flex-direction: column; }
+.companion-dialogue-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 40px; padding-right: 40px; }
+.companion-name { display: inline-flex; align-items: center; gap: 6px; color: #7d8269; font-size: 12px; font-weight: 650; white-space: nowrap; }
+.companion-name > span { width: 6px; height: 6px; border-radius: 50%; background: #91ae61; }
+.history-toggle { display: inline-flex; align-items: center; justify-content: center; gap: 5px; min-height: 40px; padding: 4px 7px; border-radius: 10px; background: transparent; color: #727963; font-size: 11px; white-space: nowrap; }
+.history-toggle:hover { background: #f0f2e7; }
+.companion-latest { height: 44px; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: #dcded1 transparent; color: #514e41; }
+.companion-latest p { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 14px; line-height: 22px; }
+.companion-latest.is-error { color: #975138; }
+.companion-dialogue > .retry-button { min-height: 40px; margin-top: 5px; }
+/* The complete transcript lives inside one bounded bubble; only the message list scrolls. */
+.companion-history { position: relative; display: flex; flex-direction: column; height: min(160px, 23dvh); min-height: 0; pointer-events: auto; }
+.companion-history .chat-messages { flex: 1; padding: 6px 2px; }
+.companion-history .chat-bubble { max-width: 92%; padding: 8px 11px; margin: 0 0 9px auto; border-radius: 15px 15px 3px 15px; background: #f1f3e8; box-shadow: none; font-size: 13px; line-height: 1.65; font-weight: 500; }
+.companion-history .chat-bubble.user { margin-left: 0; margin-right: auto; border-radius: 15px 15px 15px 3px; background: #ffecd9; }
+.companion-history .chat-bubble.is-progress { color: #70795c; }
+.companion-history .chat-bubble.is-error { background: #fff0e8; }
+.history-follow { position: absolute; right: 6px; bottom: 5px; display: inline-flex; align-items: center; gap: 5px; min-height: 36px; padding: 5px 10px; border: 1px solid #e0e5d4; border-radius: 12px; background: #fffefa; color: #63734d; box-shadow: var(--shadow-soft); font-size: 11px; }
+.dialogue-task { display: flex; align-items: center; gap: 6px; padding-top: 6px; color: #7c8567; font-size: 11px; line-height: 17px; }
+.dialogue-task > span { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
+.history-empty { color: #8b8e7e; font-size: 14px; line-height: 1.6; }
+.composer-content { flex: 1; min-width: 0; }
+.composer-title { display: flex; align-items: center; min-width: 0; font-size: 12px; line-height: 20px; font-weight: 550; color: #858671; }
+.composer-content textarea { display: block; resize: none; width: 100%; height: 44px; padding: 4px 0 0; margin: 0; border: 0; background: transparent; color: #53574b; font-size: 15px; line-height: 20px; scrollbar-width: thin; }
+.composer-content textarea::placeholder { color: #929584; opacity: 1; }
+.composer-content textarea:focus-visible { outline-offset: 2px; border-radius: 3px; }
+.send-button, .composer-action { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 48px; width: 48px; min-height: 48px; padding: 0; border-radius: 15px; background: #ffefe1; color: #d65c2e; }
+.send-button:not(:disabled):hover, .composer-action:hover { background: #ffdfc5; }
+.send-button:disabled { background: #f0f1e9; color: #a7ad9c; opacity: 1; }
+.composer-action { flex-direction: column; gap: 3px; min-height: 48px; font-size: 10px; font-weight: 650; }
+.composer-notice { position: absolute; bottom: calc(100% + 10px); left: 0; right: calc(var(--companion-size) + var(--companion-gap)); z-index: 10; border-radius: 14px; max-height: min(18dvh, 120px); overflow-y: auto; overscroll-behavior: contain; padding: 10px 14px; font-size: 13px; line-height: 1.6; color: #995132; background: #fff4e9; border: 1px solid #f6dec8; box-shadow: var(--shadow-soft); }
+.recording-detail { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; min-height: 48px; }
+.recording-time { color: #ac663a; font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.recording-detail .text-button { min-height: 48px; margin-left: auto; color: #81705a; }
+.working-detail { min-height: 36px; padding-top: 4px; font-size: 13px; line-height: 22px; color: #69745d; }
+.voice-wave { display: flex; align-items: center; gap: 4px; height: 25px; }
+.voice-wave i { display: block; height: 8px; width: 4px; border-radius: 3px; background: #d7a05e; animation: voice-wave 1s ease-in-out infinite alternate; }
+.voice-wave i:nth-child(3n) { height: 20px; }
+.voice-wave i:nth-child(3n + 1) { height: 13px; }
+
+.panel-composer > .floating-surface { background: transparent; border: 0; box-shadow: none; }
+.panel-composer > .panel-toggle { right: calc(var(--companion-size) + var(--companion-gap) + 4px); top: 4px; }
+.panel-composer.is-collapsed > .panel-toggle { width: 76px; height: 76px; left: calc(50% - 38px); }
+.panel-composer .panel-toggle-symbol > .island-companion { width: 76px; height: 76px; }
+.panel-composer .panel-activity-dot { top: 14px; right: 6px; }
+
+/* CSS-only expressions: no animation loop or timers; hidden panels pause their characters. */
+.companion-body { transform-origin: 90px 151px; animation: companion-breathe 5.5s ease-in-out infinite; }
+.companion-eyes { transform-box: fill-box; transform-origin: center; animation: companion-blink 6.5s infinite; }
+.companion-hand-left { transform-origin: 45px 98px; }
+.companion-hand-right { transform-origin: 139px 98px; }
+.companion-sprout { transform-origin: 93px 56px; }
+.companion-recording .companion-body { transform: rotate(-5deg); animation: companion-listen 2.6s ease-in-out infinite; }
+.companion-recording .companion-hand-left { transform: rotate(120deg); }
+.companion-recording .companion-sprout { animation: companion-leaf 1.8s ease-in-out infinite; }
+.companion-thinking .companion-body, .companion-transcribing .companion-body, .companion-requesting .companion-body { animation: companion-ponder 3s ease-in-out infinite; }
+.companion-thinking .companion-face { transform: translateY(-4px); }
+.companion-thinking .companion-hand-right { transform: rotate(-75deg); }
+.companion-building .companion-body { animation: companion-build 1.6s ease-in-out infinite; }
+.companion-building .companion-hand-right { transform: rotate(-24deg); }
+.companion-building .companion-hand-left { animation: companion-wave 1.6s ease-in-out infinite; }
+.floating-content[inert] .island-companion *, .floating-region[inert] .island-companion * { animation-play-state: paused; }
+@keyframes companion-breathe { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-2px); } }
+@keyframes companion-blink { 0%, 43%, 47%, 100% { transform: scaleY(1); } 45% { transform: scaleY(.1); } }
+@keyframes companion-listen { 0%, 100% { transform: rotate(-5deg); } 50% { transform: rotate(-2deg) translateY(-2px); } }
+@keyframes companion-leaf { 0%, 100% { transform: rotate(-5deg); } 50% { transform: rotate(6deg); } }
+@keyframes companion-ponder { 0%, 100% { transform: rotate(2deg); } 50% { transform: rotate(-3deg) translateY(-2px); } }
+@keyframes companion-build { 0%, 100% { transform: translateY(0) rotate(2deg); } 50% { transform: translateY(-4px) rotate(-2deg); } }
+@keyframes companion-wave { 0%, 100% { transform: rotate(0); } 50% { transform: rotate(30deg); } }
+
+@media (max-width: 760px) {
+  .companion-record-label { font-size: 10px; padding: 3px 5px; gap: 3px; }
+  .composer-bubble { padding: 6px 10px 8px; gap: 6px; border-radius: 20px 20px 8px 20px; }
+  .composer-entry { gap: 8px; min-height: 76px; }
+  .companion-dialogue-heading { flex-wrap: wrap; gap: 0; padding-right: 42px; }
+  .companion-name { font-size: 10px; gap: 4px; }
+  .history-toggle { font-size: 10px; padding-inline: 3px; gap: 3px; }
+  .history-toggle svg { width: 13px; }
+  .companion-latest p { font-size: 13px; }
+  .composer-title { font-size: 11px; line-height: 18px; }
+  .composer-content textarea { height: 44px; font-size: 16px; padding-top: 4px; }
+  .recording-detail { gap: 6px; }
+  .recording-detail .text-button { margin-left: 0; padding: 0; font-size: 11px; }
+  .recording-time { font-size: 11px; }
+  .voice-wave { gap: 3px; }
+  .voice-wave i { width: 3px; }
+  .voice-wave i:nth-child(n + 7) { display: none; }
+  .working-detail { font-size: 11px; line-height: 18px; }
+  .panel-composer > .panel-toggle { right: calc(var(--companion-size) + var(--companion-gap) + 2px); top: 4px; }
+}
+@media (max-width: 370px) {
+  .composer-bubble { padding-inline: 10px; }
+  .companion-name { gap: 3px; }
+  .history-toggle { gap: 2px; }
+  .history-toggle svg { display: none; }
+  .composer-recording .composer-entry { gap: 5px; }
+}
+/* Short windows keep a scrollable conversation beside the input instead of growing over the scene. */
+@media (max-height: 620px) and (min-width: 601px) {
+  :root { --companion-size: 64px; --companion-gap: 10px; }
+  .companion-record-label { font-size: 10px; min-height: 21px; }
+  .composer-bubble { grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); align-items: center; padding: 6px 12px; gap: 12px; border-radius: 20px 20px 8px 20px; }
+  .composer-entry { min-height: 80px; gap: 8px; }
+  .companion-dialogue + .composer-entry { border-top: 0; border-left: 1px solid var(--color-line); padding: 0 0 0 12px; }
+  .companion-dialogue-heading { padding-right: 0; min-height: 32px; }
+  .companion-dialogue-heading .history-toggle { min-height: 32px; }
+  .companion-latest p { font-size: 12px; line-height: 20px; }
+  .companion-latest { height: 40px; }
+  .composer-title { font-size: 11px; line-height: 18px; }
+  .composer-content textarea { height: 42px; font-size: 14px; padding-top: 2px; }
+  .companion-history { height: min(84px, 20dvh); }
+  .companion-history .chat-bubble { padding: 6px 9px; font-size: 12px; margin-bottom: 6px; }
+  .dialogue-task { max-height: 23px; overflow: hidden; }
+  .working-detail { min-height: 36px; font-size: 11px; padding-top: 2px; line-height: 18px; }
+  .panel-composer > .panel-toggle { right: 8px; left: auto; top: 0; }
+  .companion-record { padding-top: 48px; }
+  .composer-notice { max-height: 54px; }
+}
+@media (pointer: coarse) {
+  .history-toggle, .history-follow, .companion-dialogue > .retry-button { min-height: 48px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .island-companion, .island-companion *, .voice-wave i { animation: none; transition: none; }
+  .companion-record:not(:disabled):hover .island-companion { transform: none; }
+}

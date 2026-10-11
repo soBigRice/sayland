@@ -28,9 +28,17 @@ const grouped: SceneBatch['operations'] = [
     ? { ...operation, part: { ...operation.part, groupId: operation.part.id === 'same-prefix-a' ? 'first-object' : 'second-object' } }
     : operation),
 ];
-function completion(operations: SceneBatch['operations'], id = 'group-tool') {
+interface ApplyFixture {
+  operations: SceneBatch['operations'];
+  creations?: Array<{ operations: SceneBatch['operations']; placement: { mode: 'absolute'; position: { x: number; y: number; z: number } } }>;
+}
+const groupedCreation: ApplyFixture = { operations: [], creations: [
+  { operations: [grouped[0], ...grouped.slice(2, 4)], placement: { mode: 'absolute', position: { x: 0, y: 0, z: 0 } } },
+  { operations: [grouped[1], ...grouped.slice(4)], placement: { mode: 'absolute', position: { x: 4, y: 0, z: 0 } } },
+] };
+function completion(args: ApplyFixture, id = 'group-tool') {
   return { choices: [{ finish_reason: 'tool_calls', message: { content: null, tool_calls: [
-    { id, type: 'function', function: { name: 'apply_scene', arguments: JSON.stringify({ operations, reply: '两个小物件搭好啦。' }) } },
+    { id, type: 'function', function: { name: 'apply_scene', arguments: JSON.stringify({ ...args, reply: '两个小物件搭好啦。' }) } },
   ] } }] };
 }
 
@@ -48,7 +56,7 @@ test('new AI parts require explicit groups and missing ownership can be correcte
       assert.equal(result.error.partCount, 2); assert.equal(result.error.partIdsComplete, true);
       assert.equal(result.committed, false); assert.equal(result.originalRequest, input.text);
     }
-    return Response.json(completion(calls === 1 ? ungrouped : grouped, `group-tool-${calls}`));
+    return Response.json(completion(calls === 1 ? { operations: ungrouped } : groupedCreation, `group-tool-${calls}`));
   });
   const plan = await providers.plan(input, new AbortController().signal);
   assert.equal(calls, 2); assert.equal(JSON.stringify(empty), before);
@@ -60,13 +68,22 @@ test('new AI parts require explicit groups and missing ownership can be correcte
 
 test('repeated missing grouping stops within the existing three-plan budget', async () => {
   let calls = 0;
-  const providers = createProviders(config, async () => { calls++; return Response.json(completion(ungrouped, `missing-${calls}`)); });
+  const providers = createProviders(config, async () => { calls++; return Response.json(completion({ operations: ungrouped }, `missing-${calls}`)); });
   await assert.rejects(providers.plan(input, new AbortController().signal),
     (error: unknown) => error instanceof ApiError && error.code === 'PLAN_GROUP_REQUIRED');
   assert.equal(calls, 3);
 });
 
-test('legacy ungrouped parts can stay ungrouped or be explicitly assigned without a second grouping rule', () => {
+test('new grouped parts can be freely created through raw operations without a placement template', async () => {
+  let calls = 0;
+  const providers = createProviders(config, async () => { calls++; return Response.json(completion({ operations: grouped }, `raw-grouped-${calls}`)); });
+  const plan = await providers.plan(input, new AbortController().signal);
+  assert.equal(calls, 1); assert.deepEqual(plan.batch!.operations, grouped);
+  const result = VoxelEngine.fromSnapshot(empty).executeBatch(plan.batch!, input.requestId).snapshot;
+  assert.equal(result.groups!.length, 2); assert.equal(result.voxels.length, 2);
+});
+
+test('legacy ungrouped parts can stay ungrouped or be explicitly assigned without a second grouping rule', async () => {
   const legacy = VoxelEngine.fromSnapshot(empty).executeBatch({ protocolVersion: 1, baseRevision: empty.revision, operations: ungrouped }, 'legacy-scene').snapshot;
   const batch: SceneBatch = { protocolVersion: 1, baseRevision: legacy.revision, operations: [
     { op: 'paint_part', partId: 'same-prefix-a', color: '#33AA33', region: null },
@@ -77,6 +94,11 @@ test('legacy ungrouped parts can stay ungrouped or be explicitly assigned withou
   assert.equal(newPartGroupingIssue(legacy, result, batch), undefined);
   assert.equal(result.parts[0].groupId ?? null, null);
   assert.equal(result.parts[1].groupId, 'only-second');
+  let calls = 0;
+  const providers = createProviders(config, async () => { calls++; return Response.json(completion({ operations: batch.operations })); });
+  const plan = await providers.plan({ ...input, snapshot: legacy, text: '把第一件改绿，第二件归到一个组里' }, new AbortController().signal);
+  assert.equal(calls, 1);
+  assert.deepEqual(plan.batch, batch);
 });
 
 test('new ungrouped identities cannot evade validation by clearing or removing old identities first', () => {
@@ -104,9 +126,12 @@ test('detached legacy members survive group removal; recreated members need vali
 
 test('prefab automatic groups pass the same server rule without model-supplied manual membership', async () => {
   const operations: SceneBatch['operations'] = [{ op: 'add_prefab', prefab: 'tree', id: 'tree-one', name: '小树', origin: { x: 0, y: 0, z: 0 } }];
-  const providers = createProviders(config, async () => Response.json(completion(operations)));
+  const providers = createProviders(config, async () => Response.json(completion({ operations: [], creations: [{ operations,
+    placement: { mode: 'absolute', position: { x: -3, y: 0, z: -2 } },
+  }] })));
   const plan = await providers.plan({ ...input, text: '种一棵树' }, new AbortController().signal);
   const result = VoxelEngine.fromSnapshot(empty).executeBatch(plan.batch!, input.requestId).snapshot;
   assert.deepEqual(result.groups, [{ id: 'tree-one', name: '小树' }]);
   assert.ok(result.parts.length > 1); assert.ok(result.parts.every(part => part.groupId === 'tree-one'));
+  assert.deepEqual(plan.batch!.operations, operations);
 });

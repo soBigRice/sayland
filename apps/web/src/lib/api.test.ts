@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { acknowledge, chat, jsonRequest, readTurnDiagnostics, synthesize } from './api.ts';
-import type { ChatRequest } from '../../../../packages/protocol/src/index.ts';
+import type { ChatRequest, ScenePlan } from '../../../../packages/protocol/src/index.ts';
 
 const requestId = 'fixture-turn-receipt';
 const revision = 12;
@@ -156,4 +156,129 @@ test('debug diagnostics read the exact turn with the existing page session and a
 test('debug diagnostics reject another turn instead of displaying it under the selected request', async (t) => {
   t.mock.method(globalThis, 'fetch', async () => asJson({ ...receipt, requestId: 'other-turn' }));
   await assert.rejects(readTurnDiagnostics(requestId, new AbortController().signal), /另一次搭建/);
+});
+
+test('batch ACK sends its ID and rejects a receipt with another batch or digest', async (t) => {
+  const batchId = `${requestId}-b1`;
+  const batchReceipt = { ...receipt, batchId, digest };
+  await t.test('matching receipt', async (subtest) => {
+    const fetch = subtest.mock.method(globalThis, 'fetch', async (_path: string, init: RequestInit) => {
+      assert.deepEqual(JSON.parse(init.body as string), { revision, digest, batchId });
+      return asJson(batchReceipt);
+    });
+    assert.deepEqual(await acknowledge(requestId, revision, digest, new AbortController().signal, batchId), { reply: receipt.reply });
+    assert.equal(fetch.mock.callCount(), 1);
+  });
+  for (const wrong of [{ ...batchReceipt, batchId: 'other-batch' }, { ...batchReceipt, digest: 'b'.repeat(64) }, { ...batchReceipt, digest: undefined }]) {
+    await t.test('wrong identity or digest', async (subtest) => {
+      subtest.mock.method(globalThis, 'fetch', async () => asJson(wrong));
+      await assert.rejects(acknowledge(requestId, revision, digest, new AbortController().signal, batchId), /确认信息没有对上/);
+    });
+  }
+});
+
+test('a lost batch ACK is recovered from its exact receipt even after generation continues or stops', async (t) => {
+  const batchId = `${requestId}-b1`, batchReceipt = { ...receipt, batchId, digest };
+  for (const status of ['generating', 'awaiting_ack', 'replied', 'cancelled', 'failed']) {
+    await t.test(status, async (subtest) => {
+      const fetch = subtest.mock.method(globalThis, 'fetch', async (_path: string, init: RequestInit) => {
+        if (init.method === 'POST') throw new TypeError('batch committed before connection reset');
+        return asJson({ requestId, status, plan: { batchId: `${requestId}-b2` }, receipts: [{ ...batchReceipt, batchId: 'older-batch' }, batchReceipt] });
+      });
+      assert.deepEqual(await acknowledge(requestId, revision, digest, new AbortController().signal, batchId), { reply: receipt.reply });
+      assert.equal(fetch.mock.callCount(), 2);
+    });
+  }
+});
+
+test('receipt recovery cannot confuse a different batch, revision, digest or request with a committed batch', async (t) => {
+  const batchId = `${requestId}-b1`, batchReceipt = { ...receipt, batchId, digest };
+  for (const wrong of [{ ...batchReceipt, requestId: 'wrong-turn' }, { ...batchReceipt, batchId: 'wrong-batch' }, { ...batchReceipt, revision: revision + 1 }, { ...batchReceipt, digest: 'b'.repeat(64) }]) {
+    await t.test('mismatched receipt', async (subtest) => {
+      const fetch = subtest.mock.method(globalThis, 'fetch', async (_path: string, init: RequestInit) => {
+        if (init.method === 'POST') throw new TypeError('connection reset');
+        return asJson({ requestId, status: 'generating', receipts: [wrong] });
+      });
+      await assert.rejects(acknowledge(requestId, revision, digest, new AbortController().signal, batchId));
+      assert.equal(fetch.mock.callCount(), 2);
+    });
+  }
+});
+
+test('a pending batch ACK can retry only that exact pending batch', async (t) => {
+  const batchId = `${requestId}-b1`;
+  for (const matches of [true, false]) {
+    await t.test(String(matches), async (subtest) => {
+      let calls = 0;
+      subtest.mock.method(globalThis, 'fetch', async (_path: string, init: RequestInit) => {
+        calls++;
+        if (calls === 1) throw new TypeError('lost ACK');
+        if (init.method === 'GET') return asJson({ requestId, status: 'awaiting_ack', plan: { requestId, batchId: matches ? batchId : 'next-batch' }, receipts: [] });
+        return asJson({ ...receipt, batchId, digest });
+      });
+      const pending = acknowledge(requestId, revision, digest, new AbortController().signal, batchId);
+      if (matches) { assert.deepEqual(await pending, { reply: receipt.reply }); assert.equal(calls, 3); }
+      else { await assert.rejects(pending); assert.equal(calls, 2); }
+    });
+  }
+});
+
+const frame = (event: string, value: unknown) => `event: ${event}\ndata: ${JSON.stringify(value)}\n\n`;
+const streamPlan = (batchId: string): ScenePlan => ({ requestId, batchId, batch: { protocolVersion: 1, baseRevision: 0, operations: [] }, reply: '一批完成' });
+test('SSE awaits each batch then requires the final reply and done, cancelling the reader after done', async (t) => {
+  const order: string[] = []; let cancelled = false;
+  const bytes = new TextEncoder().encode(frame('plan', streamPlan('b1')) + frame('plan', streamPlan('b2'))
+    + frame('reply', { requestId, reply: '整轮完成' }) + frame('done', { requestId }) + frame('reply', { requestId, reply: '迟到的错误回复' }));
+  t.mock.method(globalThis, 'fetch', async () => new Response(new ReadableStream({ start(controller) { controller.enqueue(bytes); }, cancel() { cancelled = true; } })));
+  await chat({ requestId } as ChatRequest, new AbortController().signal, {
+    onStatus() {}, async onPlan(plan) { order.push(plan.batchId!); await Promise.resolve(); order.push(`ack-${plan.batchId}`); }, onReply(reply) { order.push(reply); },
+  });
+  assert.deepEqual(order, ['b1', 'ack-b1', 'b2', 'ack-b2', '整轮完成']);
+  assert.equal(cancelled, true);
+});
+
+test('SSE final reply without done is incomplete and cancellation blocks later queued batches', async (t) => {
+  await t.test('missing done', async (subtest) => {
+    subtest.mock.method(globalThis, 'fetch', async () => new Response(frame('reply', { requestId, reply: '还不能确认完成' })));
+    await assert.rejects(chat({ requestId } as ChatRequest, new AbortController().signal, { onStatus() {}, async onPlan() {}, onReply() {} }), /连接中断/);
+  });
+  await t.test('stop after one batch', async (subtest) => {
+    const controller = new AbortController(), batches: string[] = [];
+    subtest.mock.method(globalThis, 'fetch', async () => new Response(frame('plan', streamPlan('b1')) + frame('plan', streamPlan('b2')) + frame('done', { requestId })));
+    await assert.rejects(chat({ requestId } as ChatRequest, controller.signal, { onStatus() {}, async onPlan(plan) { batches.push(plan.batchId!); controller.abort(); }, onReply() {} }), { name: 'AbortError' });
+    assert.deepEqual(batches, ['b1']);
+  });
+});
+
+test('commentary survives byte-split CRLF and UTF-8 boundaries with explicit message identity', async (t) => {
+  const messages: Array<{ messageId: string; text: string }> = [], statuses: string[] = [];
+  const bytes = new TextEncoder().encode((frame('commentary', { requestId, messageId: 'ordinary-1', text: '先搭主体，再添细节。' })
+    + frame('status', { requestId, message: '继续生成' }) + frame('reply', { requestId, reply: '完成了。' }) + frame('done', { requestId })).replace(/\n/g, '\r\n'));
+  t.mock.method(globalThis, 'fetch', async () => new Response(new ReadableStream({ start(controller) { for (const byte of bytes) controller.enqueue(new Uint8Array([byte])); controller.close(); } })));
+  await chat({ requestId } as ChatRequest, new AbortController().signal, { onStatus: value => statuses.push(value), onCommentary: value => messages.push(value), async onPlan() {}, onReply() {} });
+  assert.deepEqual(messages, [{ messageId: 'ordinary-1', text: '先搭主体，再添细节。' }]); assert.deepEqual(statuses, ['继续生成']);
+});
+
+test('commentary is optional for old handlers and rejects foreign or malformed event identities', async (t) => {
+  await t.test('old handler', async subtest => {
+    subtest.mock.method(globalThis, 'fetch', async () => new Response(frame('commentary', { requestId, messageId: 'ok', text: '继续搭建。' }) + frame('done', { requestId })));
+    await chat({ requestId } as ChatRequest, new AbortController().signal, { onStatus() {}, async onPlan() {}, onReply() {} });
+  });
+  for (const value of [
+    { requestId: 'other-turn', messageId: 'id', text: '另一轮' }, { messageId: 'id', text: '缺少回合' },
+    { requestId, text: '缺少消息编号' }, { requestId, messageId: 'id', text: '' }, { requestId, messageId: 'id', text: '长'.repeat(601) },
+  ]) await t.test('invalid commentary', async subtest => {
+    let called = false;
+    subtest.mock.method(globalThis, 'fetch', async () => new Response(frame('commentary', value) + frame('done', { requestId })));
+    await assert.rejects(chat({ requestId } as ChatRequest, new AbortController().signal, { onStatus() {}, onCommentary() { called = true; }, async onPlan() {}, onReply() {} }));
+    assert.equal(called, false);
+  });
+});
+
+test('cancelled streams do not dispatch queued commentary', async (t) => {
+  const controller = new AbortController(), texts: string[] = [];
+  t.mock.method(globalThis, 'fetch', async () => new Response(frame('status', { requestId, message: '等待' })
+    + frame('commentary', { requestId, messageId: 'late', text: '不能迟到显示' }) + frame('done', { requestId })));
+  await assert.rejects(chat({ requestId } as ChatRequest, controller.signal, { onStatus() { controller.abort(); }, onCommentary(value) { texts.push(value.text); }, async onPlan() {}, onReply() {} }), { name: 'AbortError' });
+  assert.deepEqual(texts, []);
 });

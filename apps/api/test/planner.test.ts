@@ -25,43 +25,75 @@ const bad: SceneBatch['operations'] = [
 ];
 // Whole composite request retained: wider existing water plus a separate boat above it.
 const repaired: SceneBatch['operations'] = [
+  { op: 'fill_shape', partId: 'lagoon', color: '#48BFDE', shape: { kind: 'box', offset: { x: -74, y: -3, z: -16 }, size: { x: 2, y: 4, z: 33 } } },
   { op: 'define_group', group: { id: 'boat', name: '小船' } },
-  { op: 'fill_shape', partId: 'lagoon', color: '#48BFDE', shape: { kind: 'box', offset: { x: -21, y: -3, z: -16 }, size: { x: 2, y: 4, z: 33 } } },
-  { op: 'define_part', part: { id: 'boat-hull', name: '小船', role: 'other', origin: { x: -21, y: 1, z: -3 }, groupId: 'boat' } },
+  { op: 'define_part', part: { id: 'boat-hull', name: '小船', role: 'other', origin: { x: -74, y: 1, z: -3 }, groupId: 'boat' } },
   { op: 'fill_shape', partId: 'boat-hull', color: '#BA854A', shape: { kind: 'box', offset: { x: 0, y: 0, z: 0 }, size: { x: 2, y: 1, z: 5 } } },
-  { op: 'define_part', part: { id: 'boat-mast', name: '小船桅杆', role: 'detail', origin: { x: -21, y: 2, z: -1 }, groupId: 'boat' } },
+  { op: 'define_part', part: { id: 'boat-mast', name: '小船桅杆', role: 'detail', origin: { x: -74, y: 2, z: -1 }, groupId: 'boat' } },
   { op: 'fill_shape', partId: 'boat-mast', color: '#F3D7AA', shape: { kind: 'box', offset: { x: 0, y: 0, z: 0 }, size: { x: 1, y: 2, z: 1 } } },
 ];
 const reply = '河流变宽了，小船也在水面上啦。';
-const region = { min: { x: -21, y: -3, z: -17 }, max: { x: 20, y: 20, z: 17 } };
+// Exact-position fixtures retain the same world geometry; absolute is the occupied bbox minimum.
+const repairedArguments = { operations: repaired.slice(0, 1), creations: [{ operations: repaired.slice(1),
+  placement: { mode: 'absolute', position: { x: -74, y: 1, z: -3 } } }], reply };
+const collidingArguments = { ...repairedArguments, operations: [{ op: 'fill_shape', partId: 'lagoon', color: '#48BFDE',
+  shape: { kind: 'box', offset: { x: -1, y: 4, z: 0 }, size: { x: 1, y: 1, z: 1 } } }] };
+const region = { min: { x: -74, y: -3, z: -17 }, max: { x: -16, y: 20, z: 17 } };
 function tool(id: string, name: string, args: unknown) {
   return { id, type: 'function', function: { name, arguments: typeof args === 'string' ? args : JSON.stringify(args) } };
 }
 function completion(id: string, name: string, args: unknown) {
   return { choices: [{ finish_reason: 'tool_calls', message: { content: null, tool_calls: [tool(id, name, args)] } }] };
 }
+// Model fixture prelude exercises optional exact water reads before a complex edit.
+function withLagoonRead(fetcher: typeof fetch): typeof fetch {
+  let read = false;
+  return async (url, init) => {
+    if (!read) {
+      read = true;
+      const voxel = snapshot.voxels.find(voxel => voxel.partId === 'lagoon')!;
+      const origin = snapshot.parts.find(part => part.id === 'lagoon')!.origin;
+      const cell = { x: voxel.cell.x - origin.x, y: voxel.cell.y - origin.y, z: voxel.cell.z - origin.z };
+      return Response.json(completion('existing-water-read', 'read_region', { revision: snapshot.revision, partId: 'lagoon', region: { min: cell, max: cell } }));
+    }
+    return fetcher(url, init);
+  };
+}
 interface Body { messages: Array<{ role: string; content: string | null; tool_call_id?: string; tool_calls?: Array<{ id: string }> }>; tool_choice: unknown }
 function lastTool(body: Body): { ok: boolean; committed: boolean; error: { code: string; operationIndex: number; conflict: { cell: unknown; occupiedBy: { partId: string }; targetLocalCell: unknown } }; originalRequest?: string; result: { nextOffset: number | null; offset: number; runs: unknown[]; complete: boolean } } {
   return JSON.parse(body.messages.at(-1)!.content!);
 }
 
-test('historical second-operation river collision returns local facts, permits paged inspection, then commits only a complete repaired plan', async (t) => {
+test('historical second-operation river collision retains exact local facts at the kernel boundary', () => {
+  const batch: SceneBatch = { protocolVersion: 1, baseRevision: snapshot.revision, operations: bad };
+  assert.throws(() => VoxelEngine.fromSnapshot(snapshot).executeBatch(batch, 'historical-river-collision'), error => {
+    const diagnostic = diagnoseBatchFailure(snapshot, batch, error);
+    assert.equal(diagnostic.code, 'COLLISION');
+    assert.equal(diagnostic.operationIndex, 1);
+    assert.deepEqual(diagnostic.conflict!.cell, { x: -20, y: -3, z: -17 });
+    assert.deepEqual(diagnostic.conflict!.targetLocalCell, { x: 0, y: -3, z: 0 });
+    assert.equal(diagnostic.conflict!.occupiedBy!.partId, 'lagoon');
+    return true;
+  });
+});
+
+test('existing-water collision permits paged inspection, then commits only a complete repaired plan with declared boat placement', async (t) => {
   const before = JSON.stringify(snapshot);
   let call = 0, nextOffset = 0;
-  const providers = createProviders(config, async (_url, init) => {
+  const providers = createProviders(config, withLagoonRead(async (_url, init) => {
     const body = JSON.parse(String(init?.body)) as Body;
     call++;
-    if (call === 1) return Response.json(completion('original-model-id', 'apply_scene', { operations: bad, reply }));
+    if (call === 1) return Response.json(completion('original-model-id', 'apply_scene', collidingArguments));
     if (call === 2) {
       const feedback = lastTool(body);
       assert.equal(body.messages.at(-2)!.tool_calls![0].id, 'original-model-id');
       assert.equal(body.messages.at(-1)!.tool_call_id, 'original-model-id');
       assert.equal(feedback.committed, false);
       assert.equal(feedback.error.code, 'COLLISION');
-      assert.equal(feedback.error.operationIndex, 1);
-      assert.deepEqual(feedback.error.conflict.cell, { x: -15, y: -3, z: -16 });
-      assert.deepEqual(feedback.error.conflict.targetLocalCell, { x: 5, y: -3, z: 1 });
-      assert.equal(feedback.error.conflict.occupiedBy.partId, 'lagoon');
+      assert.equal(feedback.error.operationIndex, 0);
+      assert.deepEqual(feedback.error.conflict.cell, { x: -1, y: 4, z: 0 });
+      assert.deepEqual(feedback.error.conflict.targetLocalCell, { x: -1, y: 4, z: 0 });
+      assert.equal(feedback.error.conflict.occupiedBy.partId, 'island-soil');
       assert.equal(feedback.originalRequest, input.text);
       return Response.json(completion('query-page-one', 'inspect_scene', { region, partId: null, offset: 0 }));
     }
@@ -74,9 +106,9 @@ test('historical second-operation river collision returns local facts, permits p
     }
     assert.equal(call, 4);
     assert.equal(lastTool(body).result.offset, nextOffset);
-    return Response.json(completion('repaired-model-id', 'apply_scene', { operations: repaired, reply }));
-  });
-  const app = createApp(config, { providers }); t.after(() => app.close());
+    return Response.json(completion('repaired-model-id', 'apply_scene', repairedArguments));
+  }));
+  const app = createApp(config, { providers: { ...providers, plan: (request, signal, options) => providers.plan(request, signal, { ...options, commitBatch: undefined }) } }); t.after(() => app.close());
   const headers = { host: '127.0.0.1:4311', 'x-sayland-session': 'fixture-repair-session' };
   const response = await app.inject({ method: 'POST', url: '/api/chat', headers, payload: input });
   const eventData = response.body.split('\n\n').filter(Boolean).map(chunk => ({ event: chunk.split('\n')[0], data: JSON.parse(chunk.split('\n')[1].slice(6)) }));
@@ -85,11 +117,12 @@ test('historical second-operation river collision returns local facts, permits p
   assert.deepEqual(plan.batch.operations, repaired);
   assert.equal(JSON.stringify(snapshot), before);
   const projected = VoxelEngine.fromSnapshot(snapshot).executeBatch(plan.batch, input.requestId).snapshot;
-  for (const voxel of snapshot.voxels) assert.deepEqual(projected.voxels.find(other => other.id === voxel.id), voxel);
+  const projectedById = new Map(projected.voxels.map(voxel => [voxel.id, voxel]));
+  for (const voxel of snapshot.voxels) assert.deepEqual(projectedById.get(voxel.id), voxel);
   assert.equal(projected.voxels.filter(voxel => voxel.partId === 'lagoon').length - snapshot.voxels.filter(voxel => voxel.partId === 'lagoon').length, 264);
   assert.equal(projected.voxels.filter(voxel => voxel.partId.startsWith('boat-')).length, 12);
   const state = (await app.inject({ method: 'GET', url: `/api/turns/${input.requestId}`, headers })).json();
-  assert.equal(state.diagnostics.modelCalls, 4); assert.equal(state.diagnostics.queryCalls, 2); assert.equal(state.diagnostics.applyAttempts, 2);
+  assert.equal(state.diagnostics.modelCalls, 5); assert.equal(state.diagnostics.queryCalls, 3); assert.equal(state.diagnostics.applyAttempts, 2);
   assert.equal(state.diagnostics.failures[0].code, 'COLLISION');
   assert.ok(!JSON.stringify(state.diagnostics).includes(input.text));
   assert.ok(!('reply' in state));
@@ -101,7 +134,7 @@ test('historical second-operation river collision returns local facts, permits p
 
 test('invalid tool JSON and schema feed back to the model and can recover within three complete plans', async () => {
   let calls = 0;
-  const providers = createProviders(config, async (_url, init) => {
+  const providers = createProviders(config, withLagoonRead(async (_url, init) => {
     const body = JSON.parse(String(init?.body)) as Body;
     calls++;
     if (calls === 1) return Response.json(completion('bad-json', 'apply_scene', '{"operations":'));
@@ -110,15 +143,15 @@ test('invalid tool JSON and schema feed back to the model and can recover within
       return Response.json(completion('bad-shape', 'apply_scene', { operations: [{ op: 'fill_shape', partId: 'lagoon', shape: { kind: 'boat' }, color: '#FFFFFF' }], reply }));
     }
     assert.equal(lastTool(body).error.code, 'INVALID_ARGUMENT');
-    return Response.json(completion('valid-shape', 'apply_scene', { operations: repaired, reply }));
-  });
+    return Response.json(completion('valid-shape', 'apply_scene', repairedArguments));
+  }));
   const plan = await providers.plan(input, new AbortController().signal);
   assert.deepEqual(plan.batch!.operations, repaired); assert.equal(calls, 3);
 });
 
 test('three infeasible atomic plans stop with the real cause and never return a success reply', async () => {
   let calls = 0, trace: PlanTrace | undefined;
-  const providers = createProviders(config, async () => { calls++; return Response.json(completion(`collision-${calls}`, 'apply_scene', { operations: bad, reply })); });
+  const providers = createProviders(config, async () => { calls++; return Response.json(completion(`collision-${calls}`, 'apply_scene', collidingArguments)); });
   await assert.rejects(providers.plan(input, new AbortController().signal, { onDiagnostics: value => { trace = value; } }),
     (error: unknown) => error instanceof ApiError && error.code === 'PLAN_COLLISION' && !error.publicMessage.includes('小一点'));
   assert.equal(calls, 3); assert.equal(trace!.applyAttempts, 3); assert.equal(trace!.failures.length, 3);
@@ -126,21 +159,32 @@ test('three infeasible atomic plans stop with the real cause and never return a 
 
 test('uneven layer rows retain the precise kernel reason so the model can correct the geometry', async () => {
   const layerGroup: SceneBatch['operations'][number] = { op: 'define_group', group: { id: 'layer-work', name: '自由造型' } };
-  const layerPart: SceneBatch['operations'][number] = { op: 'define_part', part: { id: 'layer-object', name: '自由造型', role: 'other', origin: { x: -30, y: 1, z: 0 }, groupId: 'layer-work' } };
+  const layerPart: SceneBatch['operations'][number] = { op: 'define_part', part: { id: 'layer-object', name: '自由造型', role: 'other', origin: { x: -74, y: 1, z: 0 }, groupId: 'layer-work' } };
   const layerWrite: SceneBatch['operations'][number] = { op: 'write_layers', partId: 'layer-object', offset: { x: 0, y: 0, z: 0 },
     palette: [{ symbol: 'A', color: '#FFFFFF' }], layers: [{ y: 0, rows: ['AA', 'A'] }], mode: 'add' };
+  const malformed: SceneBatch = { protocolVersion: 1, baseRevision: snapshot.revision, operations: [layerGroup, layerPart, layerWrite] };
+  assert.throws(() => VoxelEngine.fromSnapshot(snapshot).executeBatch(malformed, 'historical-layer-width'), error => {
+    const diagnostic = diagnoseBatchFailure(snapshot, malformed, error);
+    assert.equal(diagnostic.code, 'INVALID_GEOMETRY');
+    assert.equal(diagnostic.operationIndex, 2);
+    assert.equal(diagnostic.message, 'Y=0、Z=1 的行宽应为 2');
+    return true;
+  });
   let calls = 0;
   const providers = createProviders(config, async (_url, init) => {
     calls++;
     if (calls === 2) {
       const body = JSON.parse(String(init?.body)) as Body;
       const feedback = JSON.parse(body.messages.at(-1)!.content!);
-      assert.equal(feedback.error.code, 'INVALID_GEOMETRY');
-      assert.equal(feedback.error.operationIndex, 2);
+      assert.equal(feedback.error.code, 'LAYOUT_INVALID_GEOMETRY');
+      assert.equal(feedback.error.operation.engineCode, 'INVALID_GEOMETRY');
+      assert.equal(feedback.error.operation.stage, 'local-geometry');
       assert.equal(feedback.error.message, 'Y=0、Z=1 的行宽应为 2');
     }
-    return Response.json(completion(`layers-${calls}`, 'apply_scene', { operations: [layerGroup, layerPart, calls === 1 ? layerWrite
-      : { ...layerWrite, layers: [{ y: 0, rows: ['AA', 'AA'] }] }], reply: '自由造型搭好了。' }));
+    return Response.json(completion(`layers-${calls}`, 'apply_scene', { operations: [], creations: [{
+      operations: [layerGroup, layerPart, calls === 1 ? layerWrite : { ...layerWrite, layers: [{ y: 0, rows: ['AA', 'AA'] }] }],
+      placement: { mode: 'absolute', position: { x: -74, y: 1, z: 0 } },
+    }], reply: '自由造型搭好了。' }));
   });
   const plan = await providers.plan({ ...input, text: '搭一个自由造型' }, new AbortController().signal);
   assert.equal(calls, 2);
@@ -148,10 +192,10 @@ test('uneven layer rows retain the precise kernel reason so the model can correc
 });
 
 test('new mast blocking four sail layers returns full prefix geometry and repairs all overlapping layers without changing the original scene', async () => {
-  const origin = { x: 20, y: 1, z: 12 };
+  const origin = { x: 73, y: 1, z: 12 };
   const prefix: SceneBatch['operations'] = [
+    { op: 'fill_shape', partId: 'lagoon', color: '#48BFDE', shape: { kind: 'box', offset: { x: 72, y: 0, z: 12 }, size: { x: 7, y: 1, z: 6 } } },
     { op: 'define_group', group: { id: 'boat', name: '小船' } },
-    { op: 'fill_shape', partId: 'lagoon', color: '#48BFDE', shape: { kind: 'box', offset: { x: 19, y: 0, z: 12 }, size: { x: 7, y: 1, z: 6 } } },
     { op: 'define_part', part: { id: 'boat-hull', name: '小船', role: 'other', origin, groupId: 'boat' } },
     { op: 'fill_shape', partId: 'boat-hull', color: '#BA854A', shape: { kind: 'box', offset: { x: 0, y: 0, z: 0 }, size: { x: 6, y: 1, z: 6 } } },
     { op: 'define_part', part: { id: 'boat-mast', name: '桅杆', role: 'detail', origin, groupId: 'boat' } },
@@ -165,21 +209,18 @@ test('new mast blocking four sail layers returns full prefix geometry and repair
     offset: { x: 0, y: 0, z: 0 }, mode: 'add', palette: [{ symbol: 'S', color: '#FFFFFF' }],
     layers: [4, 5, 6, 7].map(y => ({ y, rows: ['SSSSSS', 'SSSSSS', fixed ? 'SS.SSS' : 'SSSSSS', 'SSSSSS', 'SSSSSS', 'SSSSSS'] })) });
   const before = JSON.stringify(snapshot);
-  let calls = 0;
-  const providers = createProviders(config, async (_url, init) => {
-    calls++;
-    if (calls === 2) {
-      const body = JSON.parse(String(init?.body)) as Body;
-      const feedback = JSON.parse(body.messages.at(-1)!.content!) as { error: PlanDiagnostic; instruction: string; originalRequest: string };
-      const diagnostic = feedback.error;
+  // This low-level regression needs the exact prefix, even though the planner now wraps creation errors.
+  const malformed: SceneBatch = { protocolVersion: 1, baseRevision: snapshot.revision, operations: [...prefix, layers(false)] };
+  assert.throws(() => VoxelEngine.fromSnapshot(snapshot).executeBatch(malformed, 'historical-mast-sail'), error => {
+      const diagnostic = diagnoseBatchFailure(snapshot, malformed, error);
       assert.equal(diagnostic.operationIndex, 10);
       assert.equal(diagnostic.code, 'COLLISION');
       assert.equal(diagnostic.conflict!.source, 'before-failed-operation');
       assert.equal(diagnostic.conflict!.boundsAreSolid, false);
-      assert.deepEqual(diagnostic.conflict!.cell, { x: 22, y: 5, z: 14 });
+      assert.deepEqual(diagnostic.conflict!.cell, { x: 75, y: 5, z: 14 });
       const blocker = diagnostic.conflict!.occupiedBy!;
       assert.equal(blocker.partId, 'boat-mast'); assert.equal(blocker.voxelCount, 7);
-      assert.deepEqual(blocker.worldBounds, { min: { x: 22, y: 2, z: 14 }, max: { x: 22, y: 8, z: 14 } });
+      assert.deepEqual(blocker.worldBounds, { min: { x: 75, y: 2, z: 14 }, max: { x: 75, y: 8, z: 14 } });
       assert.deepEqual(blocker.localBounds, { min: { x: 2, y: 1, z: 2 }, max: { x: 2, y: 7, z: 2 } });
       assert.deepEqual(blocker.localCell, { x: 2, y: 4, z: 2 });
       assert.equal(blocker.occupancy.complete, true); assert.equal(blocker.occupancy.truncated, false);
@@ -187,19 +228,33 @@ test('new mast blocking four sail layers returns full prefix geometry and repair
       assert.deepEqual(blocker.occupancy.runs.filter(run => run.y >= 5).map(run => run.y), [5, 6, 7, 8]);
       const target = diagnostic.conflict!.targetPart!;
       assert.equal(target.partId, 'boat-sail'); assert.equal(target.voxelCount, 1);
-      assert.deepEqual(target.worldBounds, { min: { x: 20, y: 4, z: 12 }, max: { x: 20, y: 4, z: 12 } });
+      assert.deepEqual(target.worldBounds, { min: { x: 73, y: 4, z: 12 }, max: { x: 73, y: 4, z: 12 } });
       assert.deepEqual(target.localBounds, { min: { x: 0, y: 3, z: 0 }, max: { x: 0, y: 3, z: 0 } });
       assert.ok(!snapshot.parts.some(part => part.id === blocker.partId));
+      return true;
+  });
+  let calls = 0;
+  const providers = createProviders(config, withLagoonRead(async (_url, init) => {
+    calls++;
+    if (calls === 2) {
+      const body = JSON.parse(String(init?.body)) as Body;
+      const feedback = JSON.parse(body.messages.at(-1)!.content!) as { error: PlanDiagnostic; instruction: string; originalRequest: string };
+      assert.equal(feedback.error.code, 'LAYOUT_INVALID_GEOMETRY');
+      assert.equal(feedback.error.operation!.engineCode, 'COLLISION');
+      assert.equal(feedback.error.operation!.stage, 'local-geometry');
       assert.equal(feedback.originalRequest, input.text);
       assert.match(feedback.instruction, /整个重叠区域及所有相关层/);
     }
-    return Response.json(completion(`multi-layer-${calls}`, 'apply_scene', { operations: [...prefix, layers(calls === 2)], reply }));
-  });
+    return Response.json(completion(`multi-layer-${calls}`, 'apply_scene', { operations: prefix.slice(0, 1), creations: [{
+      operations: [...prefix.slice(1), layers(calls === 2)], placement: { mode: 'absolute', position: origin },
+    }], reply }));
+  }));
   const plan = await providers.plan(input, new AbortController().signal);
   assert.equal(calls, 2); assert.equal(JSON.stringify(snapshot), before);
   assert.deepEqual(plan.batch!.operations.slice(0, prefix.length), prefix);
   const projected = VoxelEngine.fromSnapshot(snapshot).executeBatch(plan.batch!, input.requestId).snapshot;
-  for (const voxel of snapshot.voxels) assert.deepEqual(projected.voxels.find(other => other.id === voxel.id), voxel);
+  const projectedById = new Map(projected.voxels.map(voxel => [voxel.id, voxel]));
+  for (const voxel of snapshot.voxels) assert.deepEqual(projectedById.get(voxel.id), voxel);
   assert.equal(projected.voxels.filter(voxel => voxel.partId === 'lagoon').length - snapshot.voxels.filter(voxel => voxel.partId === 'lagoon').length, 42);
   assert.equal(projected.voxels.filter(voxel => voxel.partId === 'boat-mast').length, 7);
   assert.equal(projected.voxels.filter(voxel => voxel.partId === 'boat-sail').length, 141);
@@ -253,9 +308,9 @@ test('prefix diagnosis retains the real cumulative batch-budget failure and oper
   assert.equal(diagnostic.code, 'BATCH_BUDGET'); assert.equal(diagnostic.operationIndex, 3);
 });
 
-test('query validation and missing parts are repairable; the fifth query never executes', async () => {
+test('query validation and missing parts are repairable; successful queries do not consume the failure budget', async () => {
   let calls = 0, trace: PlanTrace | undefined;
-  const providers = createProviders(config, async (_url, init) => {
+  const providers = createProviders(config, withLagoonRead(async (_url, init) => {
     const body = JSON.parse(String(init?.body)) as Body;
     calls++;
     if (calls === 1) return Response.json(completion('invalid-region', 'inspect_scene', { region: { min: region.max, max: region.min }, partId: null, offset: 0 }));
@@ -265,33 +320,30 @@ test('query validation and missing parts are repairable; the fifth query never e
     }
     if (calls === 3) assert.equal(lastTool(body).error.code, 'PART_NOT_FOUND');
     if (calls <= 5) return Response.json(completion(`read-${calls}`, 'inspect_scene', { region, partId: null, offset: 0 }));
-    assert.equal(lastTool(body).error.code, 'QUERY_LIMIT');
-    assert.deepEqual(body.tool_choice, { type: 'function', function: { name: 'apply_scene' } });
-    return Response.json(completion('after-query-limit', 'apply_scene', { operations: repaired, reply }));
-  });
+    assert.equal(lastTool(body).ok, true);
+    return Response.json(completion('after-query-limit', 'apply_scene', repairedArguments));
+  }));
   const plan = await providers.plan(input, new AbortController().signal, { onDiagnostics: value => { trace = value; } });
-  assert.ok(plan.batch); assert.equal(calls, 6); assert.equal(trace!.queryCalls, 4);
+  assert.ok(plan.batch); assert.equal(calls, 6); assert.equal(trace!.queryCalls, 6);
 });
 
-test('tool protocol errors are bounded by six model calls, with original IDs acknowledged but no execution', async () => {
+test('unknown tools retain original IDs and stop after two failed corrections', async () => {
   let calls = 0;
   const providers = createProviders(config, async (_url, init) => {
     calls++;
     const body = JSON.parse(String(init?.body)) as Body;
-    if (calls > 1) assert.equal(body.messages.at(-1)!.tool_call_id, `second-${calls - 1}`);
-    return Response.json({ choices: [{ finish_reason: 'tool_calls', message: { content: null, tool_calls: [
-      tool(`first-${calls}`, 'apply_scene', { operations: repaired, reply }), tool(`second-${calls}`, 'inspect_scene', { region, partId: null, offset: 0 }),
-    ] } }] });
+    if (calls > 1) assert.equal(body.messages.at(-1)!.tool_call_id, `unknown-${calls - 1}`);
+    return Response.json(completion(`unknown-${calls}`, 'not_a_tool', {}));
   });
-  await assert.rejects(providers.plan(input, new AbortController().signal), (error: unknown) => error instanceof ApiError && error.code === 'PLAN_MULTIPLE_TOOLS');
-  assert.equal(calls, 6);
+  await assert.rejects(providers.plan(input, new AbortController().signal), (error: unknown) => error instanceof ApiError && error.code === 'PLAN_UNKNOWN_TOOL');
+  assert.equal(calls, 3);
 });
 
 test('cancellation after a failed preflight prevents another paid call and leaves input unchanged', async () => {
   const controller = new AbortController();
   let calls = 0;
   const before = JSON.stringify(snapshot);
-  const providers = createProviders(config, async () => { calls++; return Response.json(completion('cancel-repair', 'apply_scene', { operations: bad, reply })); });
+  const providers = createProviders(config, async () => { calls++; return Response.json(completion('cancel-repair', 'apply_scene', collidingArguments)); });
   await assert.rejects(providers.plan(input, controller.signal, { onDiagnostics(trace) { if (trace.failures.length) controller.abort(); } }),
     (error: unknown) => error instanceof ApiError && error.code === 'CANCELLED');
   assert.equal(calls, 1); assert.equal(JSON.stringify(snapshot), before);
@@ -307,7 +359,7 @@ test('network/access failures are not retried and plain completion after failed 
   let calls = 0;
   const providers = createProviders(config, async () => {
     calls++;
-    return Response.json(calls === 1 ? completion('failed-before-text', 'apply_scene', { operations: bad, reply })
+    return Response.json(calls === 1 ? completion('failed-before-text', 'apply_scene', collidingArguments)
       : { choices: [{ finish_reason: 'stop', message: { content: reply } }] });
   });
   await assert.rejects(providers.plan(input, new AbortController().signal), (error: unknown) => error instanceof ApiError && error.code === 'PLAN_COLLISION');
